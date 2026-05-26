@@ -1,0 +1,20 @@
+# Dependency directories (never upload to git)
+node_modules/
+
+# Production build and installer artifacts (never upload raw build folders)
+release/
+dist/
+dist-electron/
+
+# System and logs
+*.log
+.DS_Store
+.idea/
+.vscode/
+
+# Dataset files & big ROS bags (large files, upload to Releases instead)
+*.bag
+*.mcap
+*.db3
+dataset/
+data/
