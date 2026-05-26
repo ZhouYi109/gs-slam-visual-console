@@ -2618,19 +2618,26 @@ export function App() {
 
               <button
                 disabled={isUpdating}
-                onClick={() => {
+                onClick={async () => {
                   setIsUpdating(true);
-                  // Mock update: downloads file, then triggers app relaunch
-                  setTimeout(async () => {
-                    setIsUpdating(false);
-                    setShowUpdateModal(false);
-                    setHasUpdate(false);
+                  try {
+                    // Trigger actual updater download from GitHub Releases
                     if (window.desktop?.restartAndInstall) {
                       await window.desktop.restartAndInstall();
                     } else {
-                      alert(language === "zh" ? "更新包下载完毕，请重启软件应用。" : "Update finished, please relaunch application.");
+                      // Fallback relaunch for dev/demo mode
+                      setTimeout(() => {
+                        setIsUpdating(false);
+                        setShowUpdateModal(false);
+                        setHasUpdate(false);
+                        alert(language === "zh" ? "本地演示更新已完成，请手动重启软件。" : "Demo update finished, please manually restart.");
+                      }, 2000);
                     }
-                  }, 2500);
+                  } catch (e: any) {
+                    console.error("Failed to execute autoupdater", e);
+                    setIsUpdating(false);
+                    alert(language === "zh" ? `更新出错: ${e.message}` : `Update error: ${e.message}`);
+                  }
                 }}
                 style={{
                   flex: 1,
@@ -2649,7 +2656,7 @@ export function App() {
                 }}
               >
                 <RefreshCw size={14} className={isUpdating ? "animate-spin" : ""} />
-                <span>{isUpdating ? (language === "zh" ? "更新中" : "Updating") : (language === "zh" ? "现在重启并更新" : "Restart & Update")}</span>
+                <span>{isUpdating ? (language === "zh" ? "正在从GitHub下载..." : "Downloading...") : (language === "zh" ? "现在重启并更新" : "Restart & Update")}</span>
               </button>
             </div>
           </div>
