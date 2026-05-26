@@ -1,6 +1,6 @@
 {
   "name": "gs-slam-visual-console",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "private": true,
   "description": "A bilingual desktop console for 3DGS-SLAM dataset inspection and runtime orchestration.",
   "main": "dist-electron/main.js",
@@ -62,7 +62,8 @@
       {
         "provider": "github",
         "owner": "ZhouYi109",
-        "repo": "gs-slam-visual-console"
+        "repo": "gs-slam-visual-console",
+        "releaseType": "release"
       }
     ],
     "win": {

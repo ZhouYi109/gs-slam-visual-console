@@ -108,7 +108,8 @@ app.on("before-quit", async (event) => {
   app.quit();
 });
 
-import { autoUpdater } from "electron-updater";
+import pkgUpdate from "electron-updater";
+const { autoUpdater } = pkgUpdate;
 
 // Configure autoUpdater log
 autoUpdater.autoDownload = false; // We want to ask first
