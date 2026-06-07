@@ -524,6 +524,20 @@ export async function createApiServer() {
     }
   });
 
+  api.get("/api/convert/status", async (request, response, next) => {
+    try {
+      const taskId = String(request.query.taskId ?? "");
+      const fetchResponse = await fetch(`http://127.0.0.1:8000/api/convert/status?taskId=${taskId}`);
+      if (fetchResponse.ok) {
+        response.json(await fetchResponse.json());
+      } else {
+        response.status(fetchResponse.status).send(await fetchResponse.text());
+      }
+    } catch (e) {
+      next(e);
+    }
+  });
+
   api.post("/api/convert/folder_to_bag", async (request, response, next) => {
     try {
       const fetchResponse = await fetch("http://127.0.0.1:8000/api/convert/folder_to_bag", {

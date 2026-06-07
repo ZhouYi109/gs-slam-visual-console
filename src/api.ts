@@ -38,10 +38,14 @@ export function inspectDataset(sourcePath: string) {
 }
 
 export function convertBagToFolder(req: import("./types").ConvertBagToFolderRequest) {
-  return request<{status: string, message: string}>("/api/convert/bag_to_folder", {
+  return request<{status: string, taskId?: string}>("/api/convert/bag_to_folder", {
     method: "POST",
     body: JSON.stringify(req)
   });
+}
+
+export function getConvertStatus(taskId: string) {
+  return request<{status: "processing" | "success" | "failed", message: string}>(`/api/convert/status?taskId=${taskId}`);
 }
 
 export function convertFolderToBag(req: import("./types").ConvertFolderToBagRequest) {

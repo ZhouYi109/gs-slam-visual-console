@@ -22,7 +22,7 @@ import {
   RefreshCw,
   Info
 } from "lucide-react";
-import { inspectDataset, convertBagToFolder, convertFolderToBag, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases } from "./api";
+import { inspectDataset, convertBagToFolder, convertFolderToBag, getConvertStatus, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases } from "./api";
 import type { DatasetInspection, RunConfiguration, SensorStreamSummary } from "./types";
 
 type Language = "zh" | "en";
@@ -916,14 +916,35 @@ export function App() {
         imageFormat: bagImageFormat,
         lidarFormat: bagLidarFormat
       });
-      if (res.status === "success") {
+      if (res.status === "processing" && res.taskId) {
+        const taskId = res.taskId;
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await getConvertStatus(taskId);
+            if (statusRes.status === "success") {
+              clearInterval(pollInterval);
+              setConvertSuccess(t.convertSuccess + " " + bagOutputPath);
+              setIsConverting(false);
+            } else if (statusRes.status === "failed") {
+              clearInterval(pollInterval);
+              setConvertError(statusRes.message || "Failed");
+              setIsConverting(false);
+            }
+          } catch (err) {
+            clearInterval(pollInterval);
+            setConvertError(err instanceof Error ? err.message : String(err));
+            setIsConverting(false);
+          }
+        }, 2000);
+      } else if (res.status === "success") {
         setConvertSuccess(t.convertSuccess + " " + bagOutputPath);
+        setIsConverting(false);
       } else {
-        setConvertError(res.message || "Failed");
+        setConvertError("Failed to start conversion");
+        setIsConverting(false);
       }
     } catch (e) {
       setConvertError(e instanceof Error ? e.message : String(e));
-    } finally {
       setIsConverting(false);
     }
   }

@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from rosbags.highlevel import AnyReader
@@ -16,6 +16,16 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+tasks = {}
+
+def run_conversion_task(task_id: str, req: ConvertBagToFolderRequest):
+    try:
+        tasks[task_id] = {"status": "processing", "message": "Converting bag..."}
+        convert_bag_to_folder(req)
+        tasks[task_id] = {"status": "success", "message": "Successfully converted bag to folder."}
+    except Exception as e:
+        tasks[task_id] = {"status": "failed", "message": f"Conversion failed: {str(e)}"}
 
 class InspectRequest(BaseModel):
     sourcePath: str
@@ -130,12 +140,17 @@ def inspect_dataset(req: InspectRequest):
         raise HTTPException(status_code=500, detail=f"Failed to parse bag file: {str(e)}")
 
 @app.post("/api/convert/bag_to_folder")
-def api_convert_bag_to_folder(req: ConvertBagToFolderRequest):
-    try:
-        convert_bag_to_folder(req)
-        return {"status": "success", "message": "Successfully converted bag to folder."}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+def api_convert_bag_to_folder(req: ConvertBagToFolderRequest, background_tasks: BackgroundTasks):
+    task_id = "bag_to_folder_" + str(int(datetime.now().timestamp()))
+    tasks[task_id] = {"status": "processing", "message": "Starting conversion..."}
+    background_tasks.add_task(run_conversion_task, task_id, req)
+    return {"status": "processing", "taskId": task_id}
+
+@app.get("/api/convert/status")
+def get_convert_status(taskId: str):
+    if taskId not in tasks:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return tasks[taskId]
 
 @app.post("/api/convert/folder_to_bag")
 def api_convert_folder_to_bag(req: ConvertFolderToBagRequest):
