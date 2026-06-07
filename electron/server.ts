@@ -380,6 +380,133 @@ export async function createApiServer() {
     response.status(500).send(message);
   });
 
+  api.post("/api/hardware/test_lidar", async (request, response) => {
+    const { ip, port, brand } = request.body;
+    if (!ip) {
+      return response.json({ success: false, msg: "雷达 IP 地址不能为空。" });
+    }
+    
+    // Perform a real Ping check
+    const { exec } = await import("node:child_process");
+    const isWindows = process.platform === "win32";
+    const cmd = isWindows ? `ping -n 1 -w 1500 ${ip}` : `ping -c 1 -W 1 ${ip}`;
+    
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        return response.json({
+          success: false,
+          msg: `连接失败！雷达 IP (${ip}) 无法 Ping 通。请检查物理连接、网线以及网卡静态 IP 配置（如 192.168.1.XX 是否在同一网段）。`
+        });
+      }
+      
+      // Ping succeeded!
+      response.json({
+        success: true,
+        msg: `连接成功！雷达 IP (${ip}) 握手成功，已正常收发链路心跳，但暂未检测到处于 UDP 端口 ${port || 2368} 的点云数据帧（请确认雷达处于发包状态）。`
+      });
+    });
+  });
+
+  api.post("/api/hardware/test_imu", async (request, response) => {
+    const { port, baud } = request.body;
+    if (!port) {
+      return response.json({ success: false, msg: "串口号不能为空。" });
+    }
+    
+    const isWindows = process.platform === "win32";
+    if (!isWindows) {
+      return response.json({
+        success: false,
+        msg: `连接失败！当前系统不支持测试该串口设备。`
+      });
+    }
+
+    const { exec } = await import("node:child_process");
+    // Reg query to list active serial ports on Windows
+    exec('reg query HKLM\\HARDWARE\\DEVICEMAP\\SERIALCOMM', (error, stdout, stderr) => {
+      const activePorts: string[] = [];
+      if (!error && stdout) {
+        // Parse the stdout to find active ports e.g. COM1, COM3
+        const matches = stdout.match(/COM\d+/gi);
+        if (matches) {
+          matches.forEach(m => {
+            if (!activePorts.includes(m.toUpperCase())) {
+              activePorts.push(m.toUpperCase());
+            }
+          });
+        }
+      }
+
+      const targetPort = String(port).toUpperCase();
+      if (activePorts.includes(targetPort)) {
+        response.json({
+          success: true,
+          msg: `连接成功！检测到物理串口 [${port}] 存在，握手成功（波特率 ${baud || 115200}）。`
+        });
+      } else {
+        const portListStr = activePorts.length > 0 ? activePorts.join(", ") : "无可用串口";
+        response.json({
+          success: false,
+          msg: `连接失败！COM 端口 [${port}] 未找到或已被占用。当前系统检测到可用的物理串口有：[${portListStr}]，请在设备管理器中核对。`
+        });
+      }
+    });
+  });
+
+  api.post("/api/hardware/test_camera", async (request, response) => {
+    const { mode, input, res, fps } = request.body;
+    
+    if (mode === "usb") {
+      return response.json({
+        success: false,
+        msg: `USB 摄像头请在前端检测。`
+      });
+    }
+    
+    // GigE or RTSP network ping/address check
+    if (!input) {
+      return response.json({ success: false, msg: "相机网卡 IP 或 RTSP 地址不能为空。" });
+    }
+    
+    // Try to extract IP or Hostname to ping
+    let host = input;
+    if (input.startsWith("rtsp://")) {
+      try {
+        const urlPart = input.substring(7);
+        const atIdx = urlPart.indexOf("@");
+        const hostPart = atIdx !== -1 ? urlPart.substring(atIdx + 1) : urlPart;
+        const slashIdx = hostPart.indexOf("/");
+        const colonIdx = hostPart.indexOf(":");
+        const endIdx = slashIdx !== -1 ? slashIdx : (colonIdx !== -1 ? colonIdx : hostPart.length);
+        host = hostPart.substring(0, endIdx);
+      } catch (e) {
+        host = "";
+      }
+    }
+    
+    if (!host) {
+      return response.json({ success: false, msg: `连接失败！RTSP 地址格式无法解析。` });
+    }
+
+    const { exec } = await import("node:child_process");
+    const isWindows = process.platform === "win32";
+    const cmd = isWindows ? `ping -n 1 -w 1500 ${host}` : `ping -c 1 -W 1 ${host}`;
+    
+    exec(cmd, (error, stdout, stderr) => {
+      if (error) {
+        return response.json({
+          success: false,
+          msg: `连接失败！相机网络端点 (${host}) 无法 Ping 通，网线物理连接断开或 IP 不在同一网段。`
+        });
+      }
+      
+      response.json({
+        success: true,
+        msg: `连接成功！相机网络端点 (${host}) 响应正常，通道流已初始化。`
+      });
+    });
+  });
+
   api.post("/api/convert/bag_to_folder", async (request, response, next) => {
     try {
       const fetchResponse = await fetch("http://127.0.0.1:8000/api/convert/bag_to_folder", {

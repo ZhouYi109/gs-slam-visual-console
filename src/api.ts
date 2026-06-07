@@ -4,7 +4,11 @@ let baseUrl: string | undefined;
 
 async function getBaseUrl() {
   if (!baseUrl) {
-    baseUrl = await window.desktop.getApiBase();
+    if (window.desktop && typeof window.desktop.getApiBase === "function") {
+      baseUrl = await window.desktop.getApiBase();
+    } else {
+      baseUrl = "http://127.0.0.1:8000";
+    }
   }
   return baseUrl;
 }
@@ -60,3 +64,34 @@ export function exportBridge(destPath: string) {
     body: JSON.stringify({ destPath })
   });
 }
+
+export function testLidarHardware(ip: string, port: string, brand: string) {
+  return request<{ success: boolean; msg: string }>("/api/hardware/test_lidar", {
+    method: "POST",
+    body: JSON.stringify({ ip, port, brand })
+  });
+}
+
+export function testImuHardware(port: string, baud: string) {
+  return request<{ success: boolean; msg: string }>("/api/hardware/test_imu", {
+    method: "POST",
+    body: JSON.stringify({ port, baud })
+  });
+}
+
+export function testCameraHardware(mode: string, input: string, res: string, fps: string) {
+  return request<{ success: boolean; msg: string }>("/api/hardware/test_camera", {
+    method: "POST",
+    body: JSON.stringify({ mode, input, res, fps })
+  });
+}
+
+export async function getGitHubReleases(): Promise<any[]> {
+  const response = await fetch("https://api.github.com/repos/ZhouYi109/gs-slam-visual-console/releases");
+  if (!response.ok) {
+    throw new Error(`获取 GitHub Releases 失败：${response.status}`);
+  }
+  return await response.json();
+}
+
+

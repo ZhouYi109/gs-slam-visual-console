@@ -30,7 +30,6 @@ def _decode_image(msg, msgtype):
     return None
 
 def _decode_pointcloud2(msg):
-    points = []
     offset_x = offset_y = offset_z = None
     for field in msg.fields:
         if field.name == 'x': offset_x = field.offset
@@ -40,13 +39,40 @@ def _decode_pointcloud2(msg):
     if offset_x is None or offset_y is None or offset_z is None:
         return []
 
-    for i in range(msg.width * msg.height):
-        base = i * msg.point_step
-        x = struct.unpack_from('<f', msg.data, base + offset_x)[0]
-        y = struct.unpack_from('<f', msg.data, base + offset_y)[0]
-        z = struct.unpack_from('<f', msg.data, base + offset_z)[0]
-        points.append((x, y, z))
-    return points
+    try:
+        data_bytes = bytes(msg.data)
+        num_points = msg.width * msg.height
+        if len(data_bytes) < num_points * msg.point_step:
+            num_points = len(data_bytes) // msg.point_step
+        
+        if num_points == 0:
+            return []
+            
+        data = np.frombuffer(data_bytes, dtype=np.uint8)[:num_points * msg.point_step]
+        grid = data.reshape((num_points, msg.point_step))
+        
+        x_bytes = grid[:, offset_x:offset_x+4].copy()
+        y_bytes = grid[:, offset_y:offset_y+4].copy()
+        z_bytes = grid[:, offset_z:offset_z+4].copy()
+        
+        x = x_bytes.view(dtype=np.float32)
+        y = y_bytes.view(dtype=np.float32)
+        z = z_bytes.view(dtype=np.float32)
+        
+        pts = np.column_stack((x, y, z))
+        return pts.tolist()
+    except Exception as e:
+        points = []
+        for i in range(msg.width * msg.height):
+            base = i * msg.point_step
+            try:
+                x = struct.unpack_from('<f', msg.data, base + offset_x)[0]
+                y = struct.unpack_from('<f', msg.data, base + offset_y)[0]
+                z = struct.unpack_from('<f', msg.data, base + offset_z)[0]
+                points.append((x, y, z))
+            except Exception:
+                pass
+        return points
 
 def _decode_livox_custom(msg):
     points = []
@@ -63,20 +89,22 @@ def _write_lidar(points, filepath, fmt):
     elif fmt == '.txt':
         np.savetxt(filepath, pts, fmt='%.6f', delimiter=' ')
     elif fmt == '.pcd':
-        with open(filepath, 'w') as f:
-            f.write("# .PCD v0.7 - Point Cloud Data file format\n")
-            f.write("VERSION 0.7\n")
-            f.write("FIELDS x y z\n")
-            f.write("SIZE 4 4 4\n")
-            f.write("TYPE F F F\n")
-            f.write("COUNT 1 1 1\n")
-            f.write(f"WIDTH {len(pts)}\n")
-            f.write("HEIGHT 1\n")
-            f.write("VIEWPOINT 0 0 0 1 0 0 0\n")
-            f.write(f"POINTS {len(pts)}\n")
-            f.write("DATA ascii\n")
-            for p in pts:
-                f.write(f"{p[0]:.6f} {p[1]:.6f} {p[2]:.6f}\n")
+        with open(filepath, 'wb') as f:
+            header = (
+                "# .PCD v0.7 - Point Cloud Data file format\n"
+                "VERSION 0.7\n"
+                "FIELDS x y z\n"
+                "SIZE 4 4 4\n"
+                "TYPE F F F\n"
+                "COUNT 1 1 1\n"
+                f"WIDTH {len(pts)}\n"
+                "HEIGHT 1\n"
+                "VIEWPOINT 0 0 0 1 0 0 0\n"
+                f"POINTS {len(pts)}\n"
+                "DATA binary\n"
+            )
+            f.write(header.encode('ascii'))
+            f.write(pts.tobytes())
 
 def convert_bag_to_folder(req: ConvertBagToFolderRequest):
     bag_path = Path(req.sourcePath)
@@ -113,7 +141,11 @@ def convert_bag_to_folder(req: ConvertBagToFolderRequest):
                 
                 t_sec = timestamp / 1e9
                 if hasattr(msg, 'header') and hasattr(msg.header, 'stamp'):
-                    t_sec = msg.header.stamp.sec + msg.header.stamp.nanosec / 1e9
+                    stamp = msg.header.stamp
+                    if hasattr(stamp, 'sec') and hasattr(stamp, 'nanosec'):
+                        t_sec = stamp.sec + stamp.nanosec / 1e9
+                    elif hasattr(stamp, 'secs') and hasattr(stamp, 'nsecs'):
+                        t_sec = stamp.secs + stamp.nsecs / 1e9
                 
                 if msgtype in IMAGE_TOPICS:
                     img = _decode_image(msg, msgtype)

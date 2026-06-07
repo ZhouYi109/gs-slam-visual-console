@@ -7,8 +7,12 @@ interface OpenDialogOptions {
 }
 
 interface Window {
-  desktop: {
+  desktop?: {
     getApiBase: () => Promise<string>;
     selectPath: (options: OpenDialogOptions) => Promise<string | null>;
+    getVersion: () => Promise<string>;
+    checkForUpdates: () => Promise<{ hasUpdate: boolean; version: string }>;
+    openConvertWindow: () => Promise<boolean>;
+    restartAndInstall: () => Promise<void>;
   };
 }

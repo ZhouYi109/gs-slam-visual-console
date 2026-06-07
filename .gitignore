@@ -18,3 +18,4 @@ dist-electron/
 *.db3
 dataset/
 data/
+node_modules

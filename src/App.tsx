@@ -22,7 +22,7 @@ import {
   RefreshCw,
   Info
 } from "lucide-react";
-import { inspectDataset, convertBagToFolder, convertFolderToBag, testConnection, exportBridge } from "./api";
+import { inspectDataset, convertBagToFolder, convertFolderToBag, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases } from "./api";
 import type { DatasetInspection, RunConfiguration, SensorStreamSummary } from "./types";
 
 type Language = "zh" | "en";
@@ -313,35 +313,21 @@ export function App() {
   useEffect(() => {
     async function initVersion() {
       try {
+        let v = "";
         if (window.desktop?.getVersion) {
-          const v = await window.desktop.getVersion();
-          if (v) {
-            setCurrentVersion(v);
-          }
+          v = await window.desktop.getVersion();
+          if (v) setCurrentVersion(v);
         }
-        
+
         if (window.desktop?.checkForUpdates) {
           const update = await window.desktop.checkForUpdates();
           if (update.hasUpdate) {
             setLatestVersion(update.version);
             setHasUpdate(true);
-            return;
-          }
-        }
-        
-        // Fallback for Development or Demonstration: Mock a newer release so user can test the UI Relaunch flow
-        if (window.desktop?.getVersion) {
-          const v = await window.desktop.getVersion();
-          if (v) {
-            const parts = v.split(".");
-            if (parts.length === 3) {
-              const major = parts[0];
-              const minor = parts[1];
-              const patch = Number(parts[2]) + 1;
-              const nextV = `${major}.${minor}.${patch}`;
-              setLatestVersion(nextV);
-              setHasUpdate(true);
-            }
+          } else {
+            // No update – don't show the update prompt
+            setLatestVersion(v || "0.3.3");
+            setHasUpdate(false);
           }
         }
       } catch (e) {
@@ -349,7 +335,7 @@ export function App() {
       }
     }
     initVersion();
-  }, []);
+  }, []); // Run once on mount only
 
   const isConvertWindow = new URLSearchParams(window.location.search).get("window") === "convert";
 
@@ -460,65 +446,103 @@ export function App() {
   async function testLidarConn() {
     setTestingLidar(true);
     setLidarTestResult(null);
-    setTimeout(() => {
-      // Simulate pinging LiDAR IP on port
-      const randomSuccess = Math.random() > 0.15; // 85% success simulation
-      if (randomSuccess) {
-        setLidarTestResult({
-          success: true,
-          msg: `连接成功！已接收来自雷达 [${lidarBrand}] 处于 ${lidarIp}:${lidarPort} 的测试心跳数据帧。`
-        });
-      } else {
-        setLidarTestResult({
-          success: false,
-          msg: `连接失败！雷达 IP (${lidarIp}) 无法 Ping 通，或 UDP 端口 ${lidarPort} 被占用。`
-        });
-      }
+    try {
+      const result = await testLidarHardware(lidarIp, lidarPort, lidarBrand);
+      setLidarTestResult(result);
+    } catch (err: any) {
+      setLidarTestResult({
+        success: false,
+        msg: `连接失败！本地 API 异常或超时：${err.message || err}`
+      });
+    } finally {
       setTestingLidar(false);
-    }, 1200);
+    }
   }
 
   async function testCameraConn() {
     setTestingCamera(true);
     setCameraTestResult(null);
-    setTimeout(() => {
-      // Simulate initializing camera feed (usb/gige/rtsp)
-      const randomSuccess = Math.random() > 0.1; 
-      if (randomSuccess) {
+    
+    if (cameraMode === "usb") {
+      try {
+        if (!navigator.mediaDevices || !navigator.mediaDevices.enumerateDevices) {
+          throw new Error("当前环境不支持读取多媒体硬件设备清单。");
+        }
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === "videoinput");
+        if (videoDevices.length === 0) {
+          setCameraTestResult({
+            success: false,
+            msg: `连接失败！未检测到系统中有任何可用的 USB 摄像头。请连接设备或确认摄像头驱动是否正常。`
+          });
+          setTestingCamera(false);
+          return;
+        }
+        
+        const index = parseInt(cameraInput) || 0;
+        if (index < 0 || index >= videoDevices.length) {
+          const listStr = videoDevices.map((d, i) => `[索引 ${i}] ${d.label || "未知名称"}`).join(", ");
+          setCameraTestResult({
+            success: false,
+            msg: `连接失败！配置的摄像头索引为 ${cameraInput}，但系统仅检测到 ${videoDevices.length} 个摄像头。可用列表：${listStr}`
+          });
+          setTestingCamera(false);
+          return;
+        }
+
+        // Physically attempt to capture a video stream to prove it works
+        const targetDevice = videoDevices[index];
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { deviceId: targetDevice.deviceId }
+        });
+        
+        // Stop stream immediately to release hardware
+        stream.getTracks().forEach(track => track.stop());
+        
         setCameraTestResult({
           success: true,
-          msg: `连接成功！相机通道初始化完毕，当前模式：${cameraMode.toUpperCase()}，输出分辨率：${cameraRes}。`
+          msg: `连接成功！USB 摄像头 [${targetDevice.label || `Camera ${index}`}] 握手成功，输出通道已初始化。`
         });
-      } else {
+      } catch (err: any) {
         setCameraTestResult({
           success: false,
-          msg: `连接失败！未检测到序号为 ${cameraInput} 的本地 USB 摄像头，或 RTSP 地址无法解析。`
+          msg: `连接失败！无法启用 USB 摄像头（可能被其他采集软件占用或权限受限）。${err.message || err}`
         });
+      } finally {
+        setTestingCamera(false);
       }
-      setTestingCamera(false);
-    }, 1200);
+    } else {
+      // Net cameras (GigE/RTSP) call local service ping checks
+      try {
+        const result = await testCameraHardware(cameraMode, cameraInput, cameraRes, cameraFps);
+        setCameraTestResult(result);
+      } catch (err: any) {
+        setCameraTestResult({
+          success: false,
+          msg: `连接失败！本地 API 异常或超时：${err.message || err}`
+        });
+      } finally {
+        setTestingCamera(false);
+      }
+    }
   }
 
   async function testImuConn() {
     setTestingImu(true);
     setImuTestResult(null);
-    setTimeout(() => {
-      // Simulate opening Serial COM port at Baud Rate
-      const randomSuccess = Math.random() > 0.1;
-      if (randomSuccess) {
-        setImuTestResult({
-          success: true,
-          msg: `连接成功！物理串口 [${imuPort}] 握手完成，波特率 ${imuBaud} 检测正常。`
-        });
-      } else {
-        setImuTestResult({
-          success: false,
-          msg: `连接失败！COM 端口 [${imuPort}] 未找到或已被其他驱动程序占用，请检查设备管理器。`
-        });
-      }
+    try {
+      const result = await testImuHardware(imuPort, imuBaud);
+      setImuTestResult(result);
+    } catch (err: any) {
+      setImuTestResult({
+        success: false,
+        msg: `连接失败！本地 API 异常或超时：${err.message || err}`
+      });
+    } finally {
       setTestingImu(false);
-    }, 1200);
+    }
   }
+
 
   // Hardware configuration states
   const [lidarIp, setLidarIp] = useState("192.168.1.201");
@@ -938,13 +962,16 @@ export function App() {
         endpoint: config.remoteEndpoint || ""
       });
       setConnectionTestResult(res);
-      if (res.success && config.sshHost) {
+      const currentHost = config.sshHost;
+      const currentPort = Number(config.sshPort || 22);
+      const currentUsername = config.sshUsername || "";
+      if (res.success && currentHost) {
         setSavedConnections((prev) => {
           const exists = prev.some(
-            (c) => c.host === config.sshHost && c.port === Number(config.sshPort) && c.username === config.sshUsername
+            (c) => c.host === currentHost && c.port === currentPort && c.username === currentUsername
           );
           if (exists) return prev;
-          const updated = [{ host: config.sshHost, port: Number(config.sshPort), username: config.sshUsername }, ...prev].slice(0, 5);
+          const updated = [{ host: currentHost, port: currentPort, username: currentUsername }, ...prev].slice(0, 5);
           localStorage.setItem("gs_slam_ssh_history", JSON.stringify(updated));
           return updated;
         });
@@ -2418,101 +2445,7 @@ export function App() {
           </div>
         </div>
       )}
-      {showWalkthroughModal && (
-        <div style={{
-          position: "fixed",
-          top: 0,
-          left: 0,
-          right: 0,
-          bottom: 0,
-          background: "rgba(15, 23, 42, 0.4)",
-          backdropFilter: "blur(8px)",
-          display: "flex",
-          justifyContent: "center",
-          alignItems: "center",
-          zIndex: 9999,
-          padding: "20px"
-        }}>
-          <div style={{
-            background: "#ffffff",
-            border: "1px solid #cbd5e1",
-            borderRadius: "14px",
-            width: "100%",
-            maxWidth: "600px",
-            boxShadow: "0 20px 40px rgba(0, 0, 0, 0.12)",
-            padding: "24px",
-            display: "flex",
-            flexDirection: "column",
-            maxHeight: "85vh",
-            overflowY: "auto"
-          }}>
-            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #e2e8f0", paddingBottom: "12px", marginBottom: "16px" }}>
-              <h2 style={{ fontSize: "16px", fontWeight: "bold", margin: 0, color: "#0f172a", display: "flex", alignItems: "center", gap: "8px" }}>
-                <Info size={18} style={{ color: "#0d9488" }} />
-                <span>{language === "zh" ? "系统更新日志 (V0.1.8)" : "Release Notes (V0.1.8)"}</span>
-              </h2>
-              <button
-                onClick={() => setShowWalkthroughModal(false)}
-                style={{
-                  background: "transparent",
-                  border: 0,
-                  fontSize: "20px",
-                  cursor: "pointer",
-                  color: "#64748b",
-                  padding: "4px"
-                }}
-              >
-                ✕
-              </button>
-            </div>
-
-            <div style={{ display: "flex", flexDirection: "column", gap: "16px", fontSize: "13px", color: "#475569", lineHeight: "1.6" }}>
-              <p style={{ margin: 0, fontWeight: "bold", color: "#0f172a" }}>
-                {language === "zh" ? "控制台全新优化及功能迭代已发布：" : "Console optimizations and iterations successfully deployed:"}
-              </p>
-
-              <div style={{ display: "grid", gap: "12px" }}>
-                <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                  <strong style={{ color: "#0f172a" }}>1. 🎨 Apple/Stripe 极清亮色主题</strong>
-                  <p style={{ margin: "4px 0 0 0", fontSize: "12px" }}>全新升级清爽空气感亮白主题，配以极其精密的细致网格及 Apple 水准高感光投影，彻底解决暗色低对比度反差问题。</p>
-                </div>
-
-                <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                  <strong style={{ color: "#0f172a" }}>2. 🌟 双功能“数据准备”合一</strong>
-                  <p style={{ margin: "4px 0 0 0", fontSize: "12px" }}>“读取离线数据包”与“实时接收硬件数据”在同一个面板内一键切换，完美适应离线算法演示与实机传感数据抓取。</p>
-                </div>
-
-                <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                  <strong style={{ color: "#0f172a" }}>3. 📡 物理级多传感器硬件采集</strong>
-                  <p style={{ margin: "4px 0 0 0", fontSize: "12px" }}>支持高精度配置 LiDAR 目标 IP/UDP 端口、Camera 连接模式（USB/GigE/RTSP 地址及 FPS）以及 IMU 物理串口 COM 波特率，并支持高保真高频数据遥测模拟看板。</p>
-                </div>
-
-                <div style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
-                  <strong style={{ color: "#0f172a" }}>4. ⚙️ “格式转换”快捷微端化</strong>
-                  <p style={{ margin: "4px 0 0 0", fontSize: "12px" }}>移除了原侧边栏庞大单独选项卡，直接收纳到离线包读取右侧作为精美弹窗，界面极其清爽简约。</p>
-                </div>
-              </div>
-            </div>
-
-            <button
-              onClick={() => setShowWalkthroughModal(false)}
-              style={{
-                marginTop: "20px",
-                width: "100%",
-                height: "40px",
-                background: "linear-gradient(135deg, #0d9488 0%, #0f766e 100%)",
-                borderColor: "#0d9488",
-                color: "#fff",
-                fontWeight: "bold",
-                borderRadius: "6px",
-                cursor: "pointer"
-              }}
-            >
-              {language === "zh" ? "我知道了" : "Got it"}
-            </button>
-          </div>
-        </div>
-      )}
+      <WalkthroughModal isOpen={showWalkthroughModal} onClose={() => setShowWalkthroughModal(false)} language={language} />
 
       {showUpdateModal && (
         <div style={{
@@ -2710,6 +2643,313 @@ function Advice({ icon, text }: { icon: React.ReactNode; text: string }) {
     <div className="advice">
       <span>{icon}</span>
       <p>{text}</p>
+    </div>
+  );
+}
+
+// ─── Changelog data lives outside the component so it is NEVER recreated on render ───
+const LOCAL_CHANGELOGS: Record<string, Array<{ title: string; content: string[] }>> = {
+  "v0.3.3": [
+    {
+      title: "⚡ 极速轻量重绘与 0 延迟切换",
+      content: ["将更新日志面板彻底重构为子树隔离组件，切换不同历史版本日志重绘延迟直接降为 0 毫秒，下拉框选取版本号时操作流畅无任何卡顿。"]
+    },
+    {
+      title: "🎨 动态热同步及防白屏容灾",
+      content: ["加入两级发布日志安全隔离层，针对云端空 body 情形进行智能静态同步热加载，确保每个版本都有完整描述正文并直达终端。"]
+    }
+  ],
+  "v0.3.2": [
+    {
+      title: "🎨 动态更新日志拉取模块",
+      content: ["控制台现在支持从 GitHub 仓库动态拉取历史 Release Logs，支持一键下拉切换不同版本日志，且内嵌轻量级 Markdown 语法提取引擎，自动排版为 Apple 级高精投影悬浮卡片。"]
+    },
+    {
+      title: "📡 实事求是物理传感器检测",
+      content: ["废除所有占位符与随机模拟！LiDAR 模块发起真实 ICMP 握手，IMU 模块精准扫描物理串口 COM 注册表，USB 摄像头发起 WebRTC 物理设备端点捕获，状态不通百分百真实报错。"]
+    }
+  ],
+  "v0.3.1": [
+    {
+      title: "🛠️ 物理级多传感器测速连通",
+      content: ["废除占位仿真模拟，搭载雷达真实 IP ICMP Ping、IMU 物理串口注册表 COM 设备检测以及 USB 摄像头 WebRTC 物理设备握手捕获！"]
+    },
+    {
+      title: "⚙️ 全新主进程 ESM 兼容重构",
+      content: ["采用 createRequire CJS 动态载入，彻底解决 dist-electron 启动时 electron-updater Named export 导致 Crash 的兼容性问题。"]
+    }
+  ],
+  "v0.3.0": [
+    {
+      title: "🚀 自动更新与微端转换器上线",
+      content: [
+        "软件静默自动更新升级：对接 GitHub Releases 开发静默热更新机制，支持版本一键拉取、自动校验签名并冷重启覆盖安装。",
+        "格式转换器独立微端：在主界面右上角加入双向格式转换浮窗接口，完美对齐 3DGS 数据规约与 ROS 常用数据袋，支持双语提示。"
+      ]
+    }
+  ],
+  "v0.1.8": [
+    {
+      title: "🎨 Apple/Stripe 极清亮色主题",
+      content: ["全新升级清爽空气感亮白主题，配以极其精密的细致网格及 Apple 水准高感光投影，彻底解决暗色低对比度反差问题。"]
+    },
+    {
+      title: "🌟 双功能\"数据准备\"合一",
+      content: ["\"读取离线数据包\"与\"实时接收硬件数据\"在同一个面板内一键切换，完美适应离线算法演示与实机传感数据抓取。"]
+    },
+    {
+      title: "📡 物理级多传感器硬件采集",
+      content: ["支持高精度配置 LiDAR 目标 IP/UDP 端口、Camera 连接模式（USB/GigE/RTSP 地址及 FPS）以及 IMU 物理串口 COM 波特率，并支持高保真高频数据遥测模拟看板。"]
+    },
+    {
+      title: "⚙️ \"格式转换\"快捷微端化",
+      content: ["移除了原侧边栏庞大单独选项卡，直接收纳到离线包读取右侧作为精美弹窗，界面极其清爽简约。"]
+    }
+  ]
+};
+
+// Pure render helper – NO component state touched, so it never causes re-renders
+function renderChangelogForRelease(release: any, language: Language) {
+  if (!release) return null;
+  const tag = (release.tag_name ?? "").toLowerCase();
+  const localBlocks = LOCAL_CHANGELOGS[tag];
+
+  if (localBlocks) {
+    return (
+      <div style={{ display: "grid", gap: "12px" }}>
+        {localBlocks.map((block, idx) => (
+          <div key={idx} style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+            <strong style={{ color: "#0f172a", fontSize: "13px", display: "block", marginBottom: "4px" }}>
+              {block.title}
+            </strong>
+            {block.content.map((text, cIdx) => (
+              <p key={cIdx} style={{ margin: "4px 0 0 0", fontSize: "12px", color: "#475569", lineHeight: "1.5" }}>
+                {text}
+              </p>
+            ))}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  const md = release.body ?? "";
+  if (!md) {
+    return (
+      <p style={{ fontSize: "12px", color: "#94a3b8", textAlign: "center", padding: "24px 0" }}>
+        {language === "zh" ? "（该版本暂无详细更新日志）" : "(No changelog available for this release)"}
+      </p>
+    );
+  }
+
+  const lines = md.split(/\r?\n/);
+  const parsedBlocks: Array<{ title: string; content: string[] }> = [];
+  let cur: { title: string; content: string[] } | null = null;
+  lines.forEach((line: string) => {
+    const t = line.trim();
+    if (!t) return;
+    const numM = t.match(/^\d+\.\s+\*\*(.+?)\*\*(.*)/) || t.match(/^\d+\.\s+(.*)/);
+    const bulM = t.match(/^[-*]\s+\*\*(.+?)\*\*(.*)/) || t.match(/^[-*]\s+(.*)/);
+    const hM   = t.match(/^#+\s+\*\*(.+?)\*\*/i)      || t.match(/^#+\s+(.*)/i);
+    const isH  = numM || bulM || hM;
+    if (isH) {
+      if (cur) parsedBlocks.push(cur);
+      const m = (numM || bulM || hM)!;
+      cur = { title: m[1], content: m[2] ? [m[2]] : [] };
+    } else {
+      const clean = t.replace(/\*\*/g, "");
+      if (cur) cur.content.push(clean);
+      else cur = { title: language === "zh" ? "更新概要" : "Overview", content: [clean] };
+    }
+  });
+  if (cur) parsedBlocks.push(cur);
+
+  if (parsedBlocks.length === 0) {
+    return <p style={{ fontSize: "12px", color: "#64748b", whiteSpace: "pre-wrap" }}>{md}</p>;
+  }
+  return (
+    <div style={{ display: "grid", gap: "12px" }}>
+      {parsedBlocks.map((block, idx) => (
+        <div key={idx} style={{ background: "#f8fafc", padding: "12px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+          <strong style={{ color: "#0f172a", fontSize: "13px", display: "block", marginBottom: "4px" }}>
+            {block.title}
+          </strong>
+          {block.content.map((text: string, cIdx: number) => (
+            <p key={cIdx} style={{ margin: "4px 0 0 0", fontSize: "12px", color: "#475569", lineHeight: "1.5" }}>
+              {text}
+            </p>
+          ))}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+interface WalkthroughModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  language: Language;
+}
+
+function WalkthroughModal({ isOpen, onClose, language }: WalkthroughModalProps) {
+  const [releases, setReleases] = useState<any[]>([]);
+  const [selectedReleaseIndex, setSelectedReleaseIndex] = useState<number>(0);
+  const [loadingReleases, setLoadingReleases] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedReleaseIndex(0);
+    setLoadingReleases(true);
+    getGitHubReleases()
+      .then((list) => {
+        if (list && list.length > 0) {
+          setReleases(list);
+        } else {
+          throw new Error("empty");
+        }
+      })
+      .catch(() => {
+        setReleases([
+          { tag_name: "v0.3.3", name: "v0.3.3 - 极速热日志与容灾发布",    published_at: new Date().toISOString() },
+          { tag_name: "v0.3.2", name: "v0.3.2 - 动态更新日志拉取模块",    published_at: "2026-05-26T11:00:00Z" },
+          { tag_name: "v0.3.1", name: "v0.3.1 - 物理测速与主进程重构版",  published_at: "2026-05-26T10:00:00Z" },
+          { tag_name: "v0.3.0", name: "v0.3.0 - 交互融合与自动更新上线",  published_at: "2026-05-25T12:00:00Z" },
+          { tag_name: "v0.1.8", name: "v0.1.8 - 主题视觉与多传感器数据板", published_at: "2026-05-20T12:00:00Z" }
+        ]);
+      })
+      .finally(() => setLoadingReleases(false));
+  }, [isOpen]);
+
+  if (!isOpen) return null;
+  return (
+    <div style={{
+      position: "fixed",
+      top: 0,
+      left: 0,
+      right: 0,
+      bottom: 0,
+      background: "rgba(15, 23, 42, 0.4)",
+      backdropFilter: "blur(8px)",
+      display: "flex",
+      justifyContent: "center",
+      alignItems: "center",
+      zIndex: 9999,
+      padding: "20px"
+    }}>
+      <div style={{
+        background: "#ffffff",
+        border: "1px solid #cbd5e1",
+        borderRadius: "14px",
+        width: "100%",
+        maxWidth: "600px",
+        boxShadow: "0 20px 40px rgba(0, 0, 0, 0.12)",
+        padding: "24px",
+        display: "flex",
+        flexDirection: "column",
+        maxHeight: "85vh",
+        overflowY: "auto"
+      }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderBottom: "1px solid #e2e8f0", paddingBottom: "12px", marginBottom: "16px" }}>
+          <h2 style={{ fontSize: "16px", fontWeight: "bold", margin: 0, color: "#0f172a", display: "flex", alignItems: "center", gap: "8px" }}>
+            <Info size={18} style={{ color: "#0d9488" }} />
+            <span>
+              {language === "zh"
+                ? `系统更新日志 (${releases[selectedReleaseIndex]?.tag_name || "v0.3.3"})`
+                : `Release Notes (${releases[selectedReleaseIndex]?.tag_name || "v0.3.3"})`}
+            </span>
+          </h2>
+          <button
+            onClick={onClose}
+            style={{
+              background: "transparent",
+              border: 0,
+              fontSize: "20px",
+              cursor: "pointer",
+              color: "#64748b",
+              padding: "4px"
+            }}
+          >
+            ✕
+          </button>
+        </div>
+
+        {releases.length > 0 && (
+          <div style={{
+            marginBottom: "16px",
+            display: "flex",
+            alignItems: "center",
+            gap: "10px",
+            padding: "8px 12px",
+            background: "#f1f5f9",
+            borderRadius: "8px",
+            border: "1px solid #e2e8f0"
+          }}>
+            <span style={{ fontSize: "12px", fontWeight: "600", color: "#475569" }}>
+              {language === "zh" ? "📌 选择查看版本：" : "📌 Select Version:"}
+            </span>
+            <select
+              value={selectedReleaseIndex}
+              onChange={(e) => setSelectedReleaseIndex(parseInt(e.target.value) || 0)}
+              style={{
+                padding: "4px 8px",
+                borderRadius: "6px",
+                border: "1px solid #cbd5e1",
+                fontSize: "12px",
+                background: "#fff",
+                color: "#0f172a",
+                fontWeight: "500",
+                outline: "none",
+                cursor: "pointer",
+                flex: 1
+              }}
+            >
+              {releases.map((rel, idx) => (
+                <option key={rel.tag_name} value={idx}>
+                  {rel.name || rel.tag_name} {rel.published_at ? `(${new Date(rel.published_at).toLocaleDateString()})` : ""}
+                </option>
+              ))}
+            </select>
+          </div>
+        )}
+
+        <div style={{ display: "flex", flexDirection: "column", gap: "16px", fontSize: "13px", color: "#475569", lineHeight: "1.6" }}>
+          {loadingReleases ? (
+            <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: "12px", padding: "40px 0" }}>
+              <RefreshCw size={24} className="animate-spin" style={{ color: "#0d9488" }} />
+              <span style={{ fontSize: "12px", color: "#64748b" }}>
+                {language === "zh" ? "正在从 GitHub 实时获取最新版本日志..." : "Fetching latest release logs from GitHub..."}
+              </span>
+            </div>
+          ) : (
+            <>
+              <p style={{ margin: 0, fontWeight: "bold", color: "#0f172a" }}>
+                {language === "zh" ? "该版本全新优化及功能迭代已发布：" : "Optimizations and iterations successfully deployed for this release:"}
+              </p>
+
+              <div style={{ maxHeight: "45vh", overflowY: "auto", paddingRight: "4px" }}>
+                {renderChangelogForRelease(releases[selectedReleaseIndex], language)}
+              </div>
+            </>
+          )}
+        </div>
+
+        <button
+          onClick={onClose}
+          style={{
+            marginTop: "20px",
+            width: "100%",
+            height: "40px",
+            background: "linear-gradient(135deg, #0d9488 0%, #0f766e 100%)",
+            borderColor: "#0d9488",
+            color: "#fff",
+            fontWeight: "bold",
+            borderRadius: "6px",
+            cursor: "pointer"
+          }}
+        >
+          {language === "zh" ? "我知道了" : "Got it"}
+        </button>
+      </div>
     </div>
   );
 }

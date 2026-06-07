@@ -108,8 +108,10 @@ app.on("before-quit", async (event) => {
   app.quit();
 });
 
-import pkgUpdate from "electron-updater";
-const { autoUpdater } = pkgUpdate;
+import { createRequire } from "node:module";
+const require = createRequire(import.meta.url);
+const { autoUpdater } = require("electron-updater");
+
 
 // Configure autoUpdater log
 autoUpdater.autoDownload = false; // We want to ask first
