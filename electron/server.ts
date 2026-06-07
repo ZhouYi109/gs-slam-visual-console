@@ -596,7 +596,13 @@ export async function createApiServer() {
   api.get("/api/dataset/file", async (request, response, next) => {
     try {
       const filePath = String(request.query.path ?? "");
-      response.sendFile(filePath);
+      const absolutePath = path.resolve(filePath);
+      try {
+        await fs.access(absolutePath);
+        response.sendFile(absolutePath);
+      } catch {
+        response.status(404).send(`File not found: ${absolutePath}`);
+      }
     } catch (e) {
       next(e);
     }

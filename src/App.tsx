@@ -449,7 +449,18 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
         if (ext === "bin" || ext === "pcd") {
           const buffer = await response.arrayBuffer();
           if (ext === "bin") {
-            positions = new Float32Array(buffer);
+            const rawFloats = new Float32Array(buffer);
+            if (rawFloats.length % 4 === 0 && rawFloats.length % 3 !== 0) {
+              const pointsCount = Math.floor(rawFloats.length / 4);
+              positions = new Float32Array(pointsCount * 3);
+              for (let i = 0; i < pointsCount; i++) {
+                positions[i * 3] = rawFloats[i * 4];
+                positions[i * 3 + 1] = rawFloats[i * 4 + 1];
+                positions[i * 3 + 2] = rawFloats[i * 4 + 2];
+              }
+            } else {
+              positions = rawFloats;
+            }
           } else {
             const textDecoder = new TextDecoder("ascii");
             const headerChunk = textDecoder.decode(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 1500)));
@@ -458,7 +469,22 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
               const newlineIndex = headerChunk.indexOf("\n", dataIndex);
               const dataStart = newlineIndex + 1;
               const pointsBuffer = buffer.slice(dataStart);
-              positions = new Float32Array(pointsBuffer);
+              const rawFloats = new Float32Array(pointsBuffer);
+              
+              const fieldsLine = headerChunk.split("\n").find(line => line.startsWith("FIELDS"));
+              const fieldsCount = fieldsLine ? fieldsLine.trim().split(/\s+/).length - 1 : 3;
+              
+              if (fieldsCount === 4) {
+                const pointsCount = Math.floor(rawFloats.length / 4);
+                positions = new Float32Array(pointsCount * 3);
+                for (let i = 0; i < pointsCount; i++) {
+                  positions[i * 3] = rawFloats[i * 4];
+                  positions[i * 3 + 1] = rawFloats[i * 4 + 1];
+                  positions[i * 3 + 2] = rawFloats[i * 4 + 2];
+                }
+              } else {
+                positions = rawFloats;
+              }
             } else {
               const fullText = textDecoder.decode(new Uint8Array(buffer));
               positions = parseAsciiLidar(fullText);
@@ -640,6 +666,24 @@ export function App() {
   const [isUnpacking, setIsUnpacking] = useState(false);
   const [unpackProgress, setUnpackProgress] = useState("");
   const [apiBase, setApiBase] = useState("");
+  const [currentImageUrl, setCurrentImageUrl] = useState("");
+
+  useEffect(() => {
+    if (playbackImages.length === 0 || !playbackPath) {
+      setCurrentImageUrl("");
+      return;
+    }
+    const filename = playbackImages[playbackIndex];
+    if (!filename) {
+      setCurrentImageUrl("");
+      return;
+    }
+    getLocalFileUrl(`${playbackPath}/images/${filename}`).then((url) => {
+      setCurrentImageUrl(url);
+    }).catch(() => {
+      setCurrentImageUrl("");
+    });
+  }, [playbackIndex, playbackImages, playbackPath]);
 
   useEffect(() => {
     if (window.desktop?.getApiBase) {
@@ -3372,9 +3416,9 @@ export function App() {
                               <span>{t.viewCamera}</span>
                             </h3>
                             <div style={{ flex: 1, background: "#0f172a", borderRadius: "8px", border: "1px solid #1e293b", display: "flex", justifyContent: "center", alignItems: "center", overflow: "hidden", minHeight: "400px", position: "relative" }}>
-                              {playbackImages[playbackIndex] ? (
+                              {currentImageUrl ? (
                                 <img 
-                                  src={`${apiBase}/api/dataset/file?path=${encodeURIComponent(playbackPath + "/images/" + playbackImages[playbackIndex])}`}
+                                  src={currentImageUrl}
                                   alt={`Frame ${playbackIndex}`}
                                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
                                 />
