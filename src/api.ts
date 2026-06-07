@@ -49,7 +49,7 @@ export function getConvertStatus(taskId: string) {
 }
 
 export function convertFolderToBag(req: import("./types").ConvertFolderToBagRequest) {
-  return request<{status: string, message: string}>("/api/convert/folder_to_bag", {
+  return request<{status: string, taskId?: string}>("/api/convert/folder_to_bag", {
     method: "POST",
     body: JSON.stringify(req)
   });

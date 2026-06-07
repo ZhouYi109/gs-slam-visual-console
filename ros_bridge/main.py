@@ -152,13 +152,20 @@ def get_convert_status(taskId: str):
         raise HTTPException(status_code=404, detail="Task not found")
     return tasks[taskId]
 
-@app.post("/api/convert/folder_to_bag")
-def api_convert_folder_to_bag(req: ConvertFolderToBagRequest):
+def run_folder_to_bag_task(task_id: str, req: ConvertFolderToBagRequest):
     try:
+        tasks[task_id] = {"status": "processing", "message": "Converting folder..."}
         convert_folder_to_bag(req)
-        return {"status": "success", "message": "Successfully converted folder to bag."}
+        tasks[task_id] = {"status": "success", "message": "Successfully converted folder to bag."}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Conversion failed: {str(e)}")
+        tasks[task_id] = {"status": "failed", "message": f"Conversion failed: {str(e)}"}
+
+@app.post("/api/convert/folder_to_bag")
+def api_convert_folder_to_bag(req: ConvertFolderToBagRequest, background_tasks: BackgroundTasks):
+    task_id = "folder_to_bag_" + str(int(datetime.now().timestamp()))
+    tasks[task_id] = {"status": "processing", "message": "Starting conversion..."}
+    background_tasks.add_task(run_folder_to_bag_task, task_id, req)
+    return {"status": "processing", "taskId": task_id}
 
 if __name__ == "__main__":
     import uvicorn

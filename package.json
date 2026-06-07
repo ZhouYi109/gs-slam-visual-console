@@ -1,6 +1,6 @@
 {
   "name": "gs-slam-visual-console",
-  "version": "0.3.5",
+  "version": "0.3.6",
   "private": true,
   "description": "A bilingual desktop console for 3DGS-SLAM dataset inspection and runtime orchestration.",
   "main": "dist-electron/main.js",

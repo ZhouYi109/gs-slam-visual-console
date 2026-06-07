@@ -959,14 +959,35 @@ export function App() {
         sourcePath: folderSourcePath,
         outputPath: folderOutputPath
       });
-      if (res.status === "success") {
+      if (res.status === "processing" && res.taskId) {
+        const taskId = res.taskId;
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await getConvertStatus(taskId);
+            if (statusRes.status === "success") {
+              clearInterval(pollInterval);
+              setConvertSuccess(t.convertSuccess + " " + folderOutputPath);
+              setIsConverting(false);
+            } else if (statusRes.status === "failed") {
+              clearInterval(pollInterval);
+              setConvertError(statusRes.message || "Failed");
+              setIsConverting(false);
+            }
+          } catch (err) {
+            clearInterval(pollInterval);
+            setConvertError(err instanceof Error ? err.message : String(err));
+            setIsConverting(false);
+          }
+        }, 2000);
+      } else if (res.status === "success") {
         setConvertSuccess(t.convertSuccess + " " + folderOutputPath);
+        setIsConverting(false);
       } else {
-        setConvertError(res.message || "Failed");
+        setConvertError("Failed to start conversion");
+        setIsConverting(false);
       }
     } catch (e) {
       setConvertError(e instanceof Error ? e.message : String(e));
-    } finally {
       setIsConverting(false);
     }
   }
