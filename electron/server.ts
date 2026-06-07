@@ -240,6 +240,44 @@ async function inspectDataset(sourcePath: string): Promise<DatasetInspection> {
   };
 }
 
+function connectSSH(config: any): Promise<Client> {
+  return new Promise((resolve, reject) => {
+    const conn = new Client();
+    conn.on("ready", () => {
+      resolve(conn);
+    }).on("error", (err) => {
+      reject(err);
+    }).connect({
+      host: config.host || "",
+      port: Number(config.port || 22),
+      username: config.username || "",
+      password: config.password || "",
+      readyTimeout: 15000
+    });
+  });
+}
+
+function runSSHCommand(conn: Client, cmd: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    conn.exec(cmd, (err, stream) => {
+      if (err) return reject(err);
+      let stdout = "";
+      let stderr = "";
+      stream.on("close", (code: number) => {
+        if (code !== 0) {
+          reject(new Error(`Command failed with code ${code}. Stderr: ${stderr}`));
+        } else {
+          resolve(stdout);
+        }
+      }).on("data", (data: any) => {
+        stdout += data.toString();
+      }).stderr.on("data", (data: any) => {
+        stderr += data.toString();
+      });
+    });
+  });
+}
+
 export async function createApiServer() {
   const api = express();
   api.use(cors());
@@ -552,6 +590,170 @@ export async function createApiServer() {
       }
     } catch (e) {
       next(e);
+    }
+  });
+
+  api.post("/api/server/find_launches", async (request, response, next) => {
+    let conn: Client | undefined;
+    try {
+      const { host, port, username, password, projectPath } = request.body;
+      conn = await connectSSH({ host, port, username, password });
+      
+      const searchPath = projectPath ? String(projectPath) : "~ /root /home";
+      const cmd = `find ${searchPath} -type f -name "*.launch" 2>/dev/null`;
+      const output = await runSSHCommand(conn, cmd);
+      const paths = output.split("\n").map(p => p.trim()).filter(Boolean);
+      
+      response.json({ success: true, paths });
+    } catch (e: any) {
+      response.status(500).json({ success: false, message: e.message || String(e) });
+    } finally {
+      if (conn) conn.end();
+    }
+  });
+
+  api.get("/api/server/list_remote_dir", async (request, response, next) => {
+    let conn: Client | undefined;
+    try {
+      const { host, port, username, password, dirPath } = request.query;
+      conn = await connectSSH({ host, port, username, password });
+      
+      const cmd = `ls -1 "${dirPath}" 2>/dev/null`;
+      const output = await runSSHCommand(conn, cmd);
+      const files = output.split("\n").map(f => f.trim()).filter(Boolean);
+      
+      response.json({ success: true, files });
+    } catch (e: any) {
+      response.status(500).json({ success: false, message: e.message || String(e) });
+    } finally {
+      if (conn) conn.end();
+    }
+  });
+
+  api.get("/api/server/get_remote_file", async (request, response, next) => {
+    let conn: Client | undefined;
+    try {
+      const { host, port, username, password, filePath } = request.query;
+      conn = await connectSSH({ host, port, username, password });
+      
+      conn.sftp((err, sftp) => {
+        if (err) {
+          if (conn) conn.end();
+          return response.status(500).send("SFTP initialization failed");
+        }
+        
+        const pathStr = String(filePath);
+        let contentType = "application/octet-stream";
+        if (pathStr.endsWith(".png")) contentType = "image/png";
+        else if (pathStr.endsWith(".jpg") || pathStr.endsWith(".jpeg")) contentType = "image/jpeg";
+        else if (pathStr.endsWith(".txt") || pathStr.endsWith(".csv")) contentType = "text/plain";
+        
+        response.setHeader("Content-Type", contentType);
+        
+        const readStream = sftp.createReadStream(pathStr);
+        readStream.on("error", (readErr: any) => {
+          if (conn) conn.end();
+          if (!response.headersSent) {
+            response.status(404).send("File not found");
+          }
+        });
+        
+        readStream.on("end", () => {
+          if (conn) conn.end();
+        });
+        
+        readStream.pipe(response);
+      });
+    } catch (e: any) {
+      if (conn) conn.end();
+      response.status(500).send(e.message || String(e));
+    }
+  });
+
+  api.get("/api/server/stream_logs", async (request, response, next) => {
+    let conn: Client | undefined;
+    
+    response.setHeader("Content-Type", "text/event-stream");
+    response.setHeader("Cache-Control", "no-cache");
+    response.setHeader("Connection", "keep-alive");
+    response.flushHeaders();
+    
+    const sendEvent = (data: any) => {
+      response.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    try {
+      const { host, port, username, password, cmd1, cmd2 } = request.query;
+      conn = await connectSSH({ host, port, username, password });
+      
+      sendEvent({ type: "status", text: "Connected to SSH server. Launching commands..." });
+
+      let activeChannels = 0;
+      const checkClose = () => {
+        if (activeChannels === 0) {
+          sendEvent({ type: "status", text: "Both processes terminated." });
+          sendEvent({ type: "exit", code: 0 });
+          response.end();
+          if (conn) conn.end();
+        }
+      };
+
+      if (cmd1) {
+        activeChannels++;
+        conn.exec(String(cmd1), (err, stream) => {
+          if (err) {
+            sendEvent({ type: "terminal1", text: `Failed to execute: ${err.message}\n` });
+            activeChannels--;
+            checkClose();
+            return;
+          }
+          stream.on("data", (data: any) => {
+            sendEvent({ type: "terminal1", text: data.toString() });
+          }).stderr.on("data", (data: any) => {
+            sendEvent({ type: "terminal1", text: data.toString() });
+          }).on("close", (code: number) => {
+            sendEvent({ type: "terminal1", text: `\n[Process 1 exited with code ${code}]\n` });
+            activeChannels--;
+            checkClose();
+          });
+        });
+      }
+
+      if (cmd2) {
+        activeChannels++;
+        conn.exec(String(cmd2), (err, stream) => {
+          if (err) {
+            sendEvent({ type: "terminal2", text: `Failed to execute: ${err.message}\n` });
+            activeChannels--;
+            checkClose();
+            return;
+          }
+          stream.on("data", (data: any) => {
+            sendEvent({ type: "terminal2", text: data.toString() });
+          }).stderr.on("data", (data: any) => {
+            sendEvent({ type: "terminal2", text: data.toString() });
+          }).on("close", (code: number) => {
+            sendEvent({ type: "terminal2", text: `\n[Process 2 exited with code ${code}]\n` });
+            activeChannels--;
+            checkClose();
+          });
+        });
+      }
+
+      if (activeChannels === 0) {
+        checkClose();
+      }
+
+      request.on("close", () => {
+        if (conn) {
+          conn.end();
+        }
+      });
+
+    } catch (e: any) {
+      sendEvent({ type: "status", text: `Connection error: ${e.message || String(e)}` });
+      response.end();
+      if (conn) conn.end();
     }
   });
 

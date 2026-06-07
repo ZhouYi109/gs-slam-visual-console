@@ -98,4 +98,39 @@ export async function getGitHubReleases(): Promise<any[]> {
   return await response.json();
 }
 
+export function findLaunches(req: { host?: string; port?: number; username?: string; password?: string; projectPath?: string }) {
+  return request<{ success: boolean; paths: string[] }>("/api/server/find_launches", {
+    method: "POST",
+    body: JSON.stringify(req)
+  });
+}
+
+export async function listRemoteDir(req: { host?: string; port?: number; username?: string; password?: string; dirPath: string }) {
+  const base = await getBaseUrl();
+  const params = new URLSearchParams({
+    host: req.host || "",
+    port: String(req.port || 22),
+    username: req.username || "",
+    password: req.password || "",
+    dirPath: req.dirPath
+  });
+  const res = await fetch(`${base}/api/server/list_remote_dir?${params.toString()}`);
+  if (!res.ok) {
+    throw new Error(`Failed to list remote directory: ${res.statusText}`);
+  }
+  return (await res.json()) as { success: boolean; files: string[] };
+}
+
+export async function getRemoteFileUrl(req: { host?: string; port?: number; username?: string; password?: string; filePath: string }) {
+  const base = await getBaseUrl();
+  const params = new URLSearchParams({
+    host: req.host || "",
+    port: String(req.port || 22),
+    username: req.username || "",
+    password: req.password || "",
+    filePath: req.filePath
+  });
+  return `${base}/api/server/get_remote_file?${params.toString()}`;
+}
+
 

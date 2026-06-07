@@ -22,7 +22,7 @@ import {
   RefreshCw,
   Info
 } from "lucide-react";
-import { inspectDataset, convertBagToFolder, convertFolderToBag, getConvertStatus, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases } from "./api";
+import { inspectDataset, convertBagToFolder, convertFolderToBag, getConvertStatus, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases, findLaunches, listRemoteDir, getRemoteFileUrl } from "./api";
 import type { DatasetInspection, RunConfiguration, SensorStreamSummary } from "./types";
 
 type Language = "zh" | "en";
@@ -398,6 +398,42 @@ export function App() {
   });
   const [showGuideModal, setShowGuideModal] = useState(false);
   const [showWalkthroughModal, setShowWalkthroughModal] = useState(false);
+
+  const [remoteProjectPath, setRemoteProjectPath] = useState<string>("");
+  const [foundLaunches, setFoundLaunches] = useState<string[]>([]);
+  const [isScanningLaunches, setIsScanningLaunches] = useState<boolean>(false);
+  const [cmd1, setCmd1] = useState<string>("");
+  const [cmd2, setCmd2] = useState<string>("");
+  const [terminal1Logs, setTerminal1Logs] = useState<string>("");
+  const [terminal2Logs, setTerminal2Logs] = useState<string>("");
+  const [isRemoteRunning, setIsRemoteRunning] = useState<boolean>(false);
+  const [remoteStatusText, setRemoteStatusText] = useState<string>("");
+  const [remoteFiles, setRemoteFiles] = useState<{ results: string[], render: string[] }>({ results: [], render: [] });
+  const [activeRenderFrame, setActiveRenderFrame] = useState<string>("");
+  const [eventSourceInstance, setEventSourceInstance] = useState<EventSource | null>(null);
+  const [remotePollingInterval, setRemotePollingInterval] = useState<any>(null);
+  const [renderImageUrl, setRenderImageUrl] = useState<string>("");
+
+  useEffect(() => {
+    if (remoteFiles.render.length > 0 && remoteProjectPath) {
+      const latestFrame = remoteFiles.render[remoteFiles.render.length - 1];
+      const getUrl = async () => {
+        try {
+          const url = await getRemoteFileUrl({
+            host: config.sshHost,
+            port: config.sshPort,
+            username: config.sshUsername,
+            password: config.sshPassword,
+            filePath: `${remoteProjectPath}/render/${latestFrame}`
+          });
+          setRenderImageUrl(url);
+        } catch (err) {
+          console.error("Failed to resolve remote file URL:", err);
+        }
+      };
+      getUrl();
+    }
+  }, [remoteFiles.render, remoteProjectPath, config.sshHost, config.sshPort, config.sshUsername, config.sshPassword]);
   const [isExporting, setIsExporting] = useState(false);
   const [exportSuccessMsg, setExportSuccessMsg] = useState("");
   const [exportErrorMsg, setExportErrorMsg] = useState("");
@@ -1027,6 +1063,144 @@ export function App() {
     } finally {
       setIsTestingConnection(false);
     }
+  }
+
+  async function handleScanLaunches() {
+    if (!config.sshHost || !config.sshUsername || !config.sshPassword) {
+      alert("请先配置并连接 SSH 服务器！");
+      return;
+    }
+    setIsScanningLaunches(true);
+    try {
+      const res = await findLaunches({
+        host: config.sshHost,
+        port: config.sshPort,
+        username: config.sshUsername,
+        password: config.sshPassword,
+        projectPath: remoteProjectPath
+      });
+      if (res.success) {
+        setFoundLaunches(res.paths);
+        // Auto match coco and gaussian launch files
+        let cocoLaunch = "";
+        let gaussianLaunch = "";
+        for (const p of res.paths) {
+          const lower = p.toLowerCase();
+          if (lower.includes("coco")) {
+            cocoLaunch = p;
+          } else if (lower.includes("gaussian")) {
+            gaussianLaunch = p;
+          }
+        }
+        if (cocoLaunch) setCmd1(`roslaunch ${cocoLaunch}`);
+        else if (res.paths.length > 0) setCmd1(`roslaunch ${res.paths[0]}`);
+        
+        if (gaussianLaunch) setCmd2(`roslaunch ${gaussianLaunch}`);
+        else if (res.paths.length > 1) setCmd2(`roslaunch ${res.paths[1]}`);
+        
+        alert(`扫描成功，发现 ${res.paths.length} 个 .launch 文件！`);
+      } else {
+        alert("扫描 launch 文件失败");
+      }
+    } catch (e: any) {
+      alert("扫描出错: " + (e.message || String(e)));
+    } finally {
+      setIsScanningLaunches(false);
+    }
+  }
+
+  async function handleStartRemoteRun() {
+    if (!config.sshHost || !config.sshUsername || !config.sshPassword) {
+      alert("请先配置并连接 SSH 服务器！");
+      return;
+    }
+    setIsRemoteRunning(true);
+    setTerminal1Logs("");
+    setTerminal2Logs("");
+    setRemoteStatusText("正在初始化远程命令流...");
+
+    try {
+      const apiBase = await window.desktop?.getApiBase() || "http://127.0.0.1:8000";
+      const params = new URLSearchParams({
+        host: config.sshHost || "",
+        port: String(config.sshPort || 22),
+        username: config.sshUsername || "",
+        password: config.sshPassword || "",
+        cmd1: cmd1,
+        cmd2: cmd2
+      });
+
+      const es = new EventSource(`${apiBase}/api/server/stream_logs?${params.toString()}`);
+      es.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === "terminal1") {
+          setTerminal1Logs((prev) => prev + data.text);
+        } else if (data.type === "terminal2") {
+          setTerminal2Logs((prev) => prev + data.text);
+        } else if (data.type === "status") {
+          setRemoteStatusText((prev) => prev + "\n" + data.text);
+        } else if (data.type === "exit") {
+          setIsRemoteRunning(false);
+          es.close();
+        }
+      };
+
+      es.onerror = () => {
+        setRemoteStatusText((prev) => prev + "\n[EventSource 异常断开]");
+        setIsRemoteRunning(false);
+        es.close();
+      };
+
+      setEventSourceInstance(es);
+
+      // Start files polling
+      if (remotePollingInterval) {
+        clearInterval(remotePollingInterval);
+      }
+      
+      const interval = setInterval(async () => {
+        try {
+          const hostParams = {
+            host: config.sshHost,
+            port: config.sshPort,
+            username: config.sshUsername,
+            password: config.sshPassword
+          };
+          const renderRes = await listRemoteDir({
+            ...hostParams,
+            dirPath: `${remoteProjectPath}/render`
+          });
+          const resultsRes = await listRemoteDir({
+            ...hostParams,
+            dirPath: `${remoteProjectPath}/results`
+          });
+          setRemoteFiles({
+            render: renderRes.success ? renderRes.files : [],
+            results: resultsRes.success ? resultsRes.files : []
+          });
+        } catch (err) {
+          console.error("Error polling files:", err);
+        }
+      }, 3000);
+      setRemotePollingInterval(interval);
+
+    } catch (e: any) {
+      setRemoteStatusText("执行失败: " + e.message);
+      setIsRemoteRunning(false);
+    }
+  }
+
+  function handleStopRemoteRun() {
+    if (eventSourceInstance) {
+      eventSourceInstance.close();
+      setEventSourceInstance(null);
+    }
+    if (remotePollingInterval) {
+      clearInterval(remotePollingInterval);
+      setRemotePollingInterval(null);
+    }
+    setIsRemoteRunning(false);
+    setRemoteStatusText((prev) => prev + "\n[运行被用户手动停止]");
   }
 
   async function analyze() {
@@ -2187,6 +2361,16 @@ export function App() {
                           />
                         </label>
 
+                        <label className="field" style={{ margin: 0, gridColumn: "span 2" }}>
+                          <span>服务器端工程根路径 (Remote Project Path)</span>
+                          <input
+                            placeholder="例如：/root/Gaussian-LIC"
+                            value={remoteProjectPath}
+                            onChange={(e) => setRemoteProjectPath(e.target.value)}
+                            style={{ background: "#fffdf8" }}
+                          />
+                        </label>
+
                         {connectionType === "tunnel" && (
                           <div style={{
                             gridColumn: "span 2",
@@ -2339,6 +2523,266 @@ export function App() {
                     <Advice icon={<Settings2 size={18} />} text={t.localAdvice} />
                     <Advice icon={<Server size={18} />} text={t.remoteAdvice} />
                     <Advice icon={<GitCompare size={18} />} text={t.hybridAdvice} />
+                  </section>
+                </div>
+              )}
+
+              {config.algorithmMode === "remote" && activeTab === "run" && (
+                <div style={{ maxWidth: "1080px", margin: "20px auto 0 auto", width: "100%", display: "flex", flexDirection: "column", gap: "20px" }}>
+                  <section className="panel" style={{ padding: "20px" }}>
+                    <div className="panel-heading" style={{ marginBottom: "16px" }}>
+                      <div>
+                        <span className="eyebrow">SSH Remote Orchestrator</span>
+                        <h2>远程算法运行控制台 (Gaussian-LIC Console)</h2>
+                      </div>
+                      <Server size={22} style={{ color: "#2a776f" }} />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginBottom: "16px" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        <label className="field" style={{ margin: 0 }}>
+                          <span>指令 1：coco-LIC 启动命令</span>
+                          <textarea
+                            value={cmd1}
+                            onChange={(e) => setCmd1(e.target.value)}
+                            placeholder="例如：roslaunch coco_lic coco.launch"
+                            style={{ width: "100%", height: "80px", padding: "8px", borderRadius: "6px", border: "1px solid rgba(38,35,30,0.12)", background: "#fffdf8", outline: "none", fontSize: "12px", fontFamily: "monospace" }}
+                          />
+                        </label>
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                        <label className="field" style={{ margin: 0 }}>
+                          <span>指令 2：gaussian-LIC 启动命令</span>
+                          <textarea
+                            value={cmd2}
+                            onChange={(e) => setCmd2(e.target.value)}
+                            placeholder="例如：roslaunch gaussian_lic gaussian.launch"
+                            style={{ width: "100%", height: "80px", padding: "8px", borderRadius: "6px", border: "1px solid rgba(38,35,30,0.12)", background: "#fffdf8", outline: "none", fontSize: "12px", fontFamily: "monospace" }}
+                          />
+                        </label>
+                      </div>
+                    </div>
+
+                    <div style={{ display: "flex", gap: "12px", alignItems: "center", marginBottom: "16px" }}>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleScanLaunches}
+                        disabled={isScanningLaunches}
+                        style={{ height: "38px", padding: "0 16px", fontWeight: "bold" }}
+                      >
+                        <RefreshCw size={14} className={isScanningLaunches ? "animate-spin" : ""} style={{ marginRight: "6px" }} />
+                        一键扫描服务器 Launch
+                      </button>
+
+                      <button
+                        type="button"
+                        className="primary"
+                        onClick={handleStartRemoteRun}
+                        disabled={isRemoteRunning}
+                        style={{ height: "38px", padding: "0 16px", fontWeight: "bold" }}
+                      >
+                        <Play size={14} style={{ marginRight: "6px" }} />
+                        一键发送至终端并运行
+                      </button>
+
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={handleStopRemoteRun}
+                        disabled={!isRemoteRunning}
+                        style={{ height: "38px", padding: "0 16px", fontWeight: "bold", background: "rgba(143, 45, 30, 0.05)", color: "#8f2d1e", borderColor: "rgba(143, 45, 30, 0.2)" }}
+                      >
+                        <StopCircle size={14} style={{ marginRight: "6px" }} />
+                        停止运行
+                      </button>
+
+                      <span style={{ fontSize: "12px", color: isRemoteRunning ? "#1e6f47" : "#64748b", fontWeight: "bold" }}>
+                        状态：{remoteStatusText.split("\n").pop()}
+                      </span>
+                    </div>
+
+                    {foundLaunches.length > 0 && (
+                      <div style={{ margin: "10px 0 16px 0", padding: "12px", background: "rgba(0,0,0,0.02)", borderRadius: "6px", border: "1px solid rgba(0,0,0,0.05)" }}>
+                        <span style={{ fontSize: "12px", fontWeight: "bold", display: "block", marginBottom: "6px" }}>服务器端找到的 Launch 文件：</span>
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "6px" }}>
+                          {foundLaunches.map((p, idx) => (
+                            <span
+                              key={idx}
+                              onClick={() => {
+                                const lower = p.toLowerCase();
+                                if (lower.includes("coco")) {
+                                  setCmd1(`roslaunch ${p}`);
+                                } else {
+                                  setCmd2(`roslaunch ${p}`);
+                                }
+                              }}
+                              style={{ fontSize: "11px", background: "#fff", border: "1px solid rgba(0,0,0,0.1)", borderRadius: "4px", padding: "3px 6px", cursor: "pointer", fontFamily: "monospace" }}
+                              title="点击填入命令"
+                            >
+                              {p.split("/").pop()}
+                            </span>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "16px", marginTop: "16px" }}>
+                      <div>
+                        <span style={{ fontSize: "12px", fontWeight: "bold", display: "block", marginBottom: "6px", color: "#475569" }}>Terminal 1 (coco-LIC)</span>
+                        <pre style={{
+                          background: "#0f172a",
+                          color: "#38bdf8",
+                          padding: "12px",
+                          borderRadius: "8px",
+                          height: "300px",
+                          overflowY: "auto",
+                          margin: 0,
+                          fontSize: "11px",
+                          fontFamily: "Consolas, Monaco, monospace",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all"
+                        }}>
+                          {terminal1Logs || "等待接收指令 1 终端输出..."}
+                        </pre>
+                      </div>
+
+                      <div>
+                        <span style={{ fontSize: "12px", fontWeight: "bold", display: "block", marginBottom: "6px", color: "#475569" }}>Terminal 2 (gaussian-LIC)</span>
+                        <pre style={{
+                          background: "#0f172a",
+                          color: "#34d399",
+                          padding: "12px",
+                          borderRadius: "8px",
+                          height: "300px",
+                          overflowY: "auto",
+                          margin: 0,
+                          fontSize: "11px",
+                          fontFamily: "Consolas, Monaco, monospace",
+                          whiteSpace: "pre-wrap",
+                          wordBreak: "break-all"
+                        }}>
+                          {terminal2Logs || "等待接收指令 2 终端输出..."}
+                        </pre>
+                      </div>
+                    </div>
+                  </section>
+
+                  <section className="panel" style={{ padding: "20px" }}>
+                    <div className="panel-heading" style={{ marginBottom: "16px" }}>
+                      <div>
+                        <span className="eyebrow">Realtime Output Monitor</span>
+                        <h2>服务器端运行产出可视化</h2>
+                      </div>
+                      <Database size={22} style={{ color: "#2a776f" }} />
+                    </div>
+
+                    <div style={{ display: "grid", gridTemplateColumns: "1.25fr 1fr", gap: "20px" }}>
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                        <span style={{ fontSize: "12px", fontWeight: "bold", color: "#475569" }}>连续帧渲染结果 (render/ 实时画面)</span>
+                        <div style={{
+                          width: "100%",
+                          height: "340px",
+                          background: "#1e1b17",
+                          borderRadius: "8px",
+                          display: "flex",
+                          alignItems: "center",
+                          justifyContent: "center",
+                          overflow: "hidden",
+                          border: "1px solid rgba(0,0,0,0.1)"
+                        }}>
+                          {renderImageUrl ? (
+                            <img
+                              src={renderImageUrl}
+                              alt="Remote frame rendering"
+                              style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                            />
+                          ) : (
+                            <div style={{ textAlign: "center", color: "#a9a59f" }}>
+                              <Radar size={40} style={{ margin: "0 auto 10px auto", opacity: 0.5 }} className={isRemoteRunning ? "animate-spin" : ""} />
+                              <span style={{ fontSize: "12px" }}>等待服务器输出 render 文件夹的连续图像帧...</span>
+                            </div>
+                          )}
+                        </div>
+                        {remoteFiles.render.length > 0 && (
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", fontSize: "11px", color: "#64748b" }}>
+                            <span>当前图像: {remoteFiles.render[remoteFiles.render.length - 1]}</span>
+                            <span>已渲染帧数: {remoteFiles.render.length}</span>
+                          </div>
+                        )}
+                      </div>
+
+                      <div style={{ display: "flex", flexDirection: "column", gap: "10px" }}>
+                        <span style={{ fontSize: "12px", fontWeight: "bold", color: "#475569" }}>结果产出文件 (results/ 文件夹)</span>
+                        <div style={{
+                          background: "rgba(0,0,0,0.02)",
+                          border: "1px solid rgba(38,35,30,0.08)",
+                          borderRadius: "8px",
+                          padding: "12px",
+                          height: "340px",
+                          overflowY: "auto",
+                          display: "flex",
+                          flexDirection: "column",
+                          gap: "8px"
+                        }}>
+                          {remoteFiles.results.length === 0 ? (
+                            <div style={{ margin: "auto", textAlign: "center", color: "#64748b", fontSize: "12px" }}>
+                              暂无结果产出文件 (results/ 文件夹为空)
+                            </div>
+                          ) : (
+                            remoteFiles.results.map((fileName, idx) => {
+                              const isGt = fileName.toLowerCase().includes("gt") || fileName.toLowerCase().includes("truth");
+                              return (
+                                <div
+                                  key={idx}
+                                  style={{
+                                    display: "flex",
+                                    alignItems: "center",
+                                    justifyContent: "space-between",
+                                    padding: "8px 12px",
+                                    background: "#fff",
+                                    border: "1px solid rgba(38,35,30,0.06)",
+                                    borderRadius: "6px",
+                                    fontSize: "12px"
+                                  }}
+                                >
+                                  <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+                                    <Route size={16} style={{ color: isGt ? "#1e6f47" : "#2a776f" }} />
+                                    <span style={{ fontWeight: isGt ? "bold" : "normal", color: "#1e1b17" }}>{fileName}</span>
+                                  </div>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        const url = await getRemoteFileUrl({
+                                          host: config.sshHost,
+                                          port: config.sshPort,
+                                          username: config.sshUsername,
+                                          password: config.sshPassword,
+                                          filePath: `${remoteProjectPath}/results/${fileName}`
+                                        });
+                                        window.desktop ? window.open(url) : window.open(url, "_blank");
+                                      } catch (err) {
+                                        alert("无法读取远程文件");
+                                      }
+                                    }}
+                                    style={{
+                                      fontSize: "11px",
+                                      padding: "2px 6px",
+                                      height: "auto",
+                                      minHeight: "auto"
+                                    }}
+                                  >
+                                    查看
+                                  </button>
+                                </div>
+                              );
+                            })
+                          )}
+                        </div>
+                      </div>
+                    </div>
                   </section>
                 </div>
               )}
