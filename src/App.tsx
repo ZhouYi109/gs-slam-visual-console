@@ -342,6 +342,7 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
   const controlsRef = useRef<OrbitControls | null>(null);
   const pointsRef = useRef<THREE.Points | null>(null);
   const [loading, setLoading] = useState(false);
+  const [isReady, setIsReady] = useState(false);
 
   // Initialize ThreeJS Scene
   useEffect(() => {
@@ -418,6 +419,7 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
       rendererRef.current.setSize(width, height);
     });
     resizeObserver.observe(mountRef.current);
+    setIsReady(true);
 
     return () => {
       cancelAnimationFrame(animationFrameId);
@@ -430,7 +432,7 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
 
   // Fetch and parse LiDAR file whenever filename changes
   useEffect(() => {
-    if (!filename || !folderPath || !sceneRef.current) return;
+    if (!isReady || !filename || !folderPath || !sceneRef.current) return;
 
     let active = true;
     setLoading(true);
@@ -529,7 +531,7 @@ const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
     return () => {
       active = false;
     };
-  }, [filename, folderPath]);
+  }, [filename, folderPath, isReady]);
 
   return (
     <div style={{ width: "100%", height: "100%", position: "relative" }}>
@@ -637,7 +639,7 @@ export function App() {
   const [playbackError, setPlaybackError] = useState("");
   const [isUnpacking, setIsUnpacking] = useState(false);
   const [unpackProgress, setUnpackProgress] = useState("");
-  const [apiBase, setApiBase] = useState("http://127.0.0.1:8000");
+  const [apiBase, setApiBase] = useState("");
 
   useEffect(() => {
     if (window.desktop?.getApiBase) {
