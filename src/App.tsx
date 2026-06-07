@@ -1,4 +1,4 @@
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import type React from "react";
 import {
   Activity,
@@ -22,8 +22,10 @@ import {
   RefreshCw,
   Info
 } from "lucide-react";
-import { inspectDataset, convertBagToFolder, convertFolderToBag, getConvertStatus, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases, findLaunches, listRemoteDir, getRemoteFileUrl } from "./api";
+import { inspectDataset, convertBagToFolder, convertFolderToBag, getConvertStatus, testConnection, exportBridge, testLidarHardware, testImuHardware, testCameraHardware, getGitHubReleases, findLaunches, listRemoteDir, getRemoteFileUrl, getDatasetFiles, getLocalFileUrl } from "./api";
 import type { DatasetInspection, RunConfiguration, SensorStreamSummary } from "./types";
+import * as THREE from "three";
+import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
 
 type Language = "zh" | "en";
 
@@ -93,6 +95,20 @@ const copy = {
     view3dgs: "实时高斯渲染 (3DGS Render View)",
     viewTrajectory: "三维全局轨迹 (Global Trajectory)",
     navConvert: "格式转换",
+    navPlayback: "数据播放",
+    playbackTitle: "离线数据播放看板",
+    selectFolderOrBag: "选择数据集文件夹或 ROS Bag",
+    playbackControls: "播放控制",
+    playbackSpeed: "播放速度",
+    play: "播放",
+    pause: "暂停",
+    stepForward: "单帧前进",
+    stepBackward: "单帧后退",
+    loop: "循环播放",
+    imuTitle: "IMU 惯导数据流 (轮转)",
+    lidar3dTitle: "3D 激光雷达点云 (RVIZ 交互视角)",
+    radarBody: "雷达本体",
+    noData: "暂无数据，请先选择文件夹或将 rosbag 转换为文件夹后播放",
     convertTitle: "格式转换 (ROS Bag ↔ 可视化文件夹)",
     convertText: "在 ROS Bag 格式与可视化文件夹目录（包含图片文件夹、IMU数据CSV以及激光雷达点云）之间进行转换。",
     bagToFolder: "ROS Bag → 文件夹",
@@ -218,6 +234,20 @@ const copy = {
     view3dgs: "3DGS Render View",
     viewTrajectory: "Global Trajectory",
     navConvert: "Convert",
+    navPlayback: "Playback",
+    playbackTitle: "Offline Data Playback Dashboard",
+    selectFolderOrBag: "Select Dataset Folder or ROS Bag",
+    playbackControls: "Playback Controls",
+    playbackSpeed: "Playback Speed",
+    play: "Play",
+    pause: "Pause",
+    stepForward: "Step Forward",
+    stepBackward: "Step Backward",
+    loop: "Loop Playback",
+    imuTitle: "IMU Telemetry Stream (Rolling)",
+    lidar3dTitle: "3D LiDAR Point Cloud (RVIZ Orbit View)",
+    radarBody: "LiDAR Body",
+    noData: "No data. Please select a dataset folder or convert a ROS Bag first.",
     convertTitle: "Format Conversion (ROS Bag ↔ Visual Folder)",
     convertText: "Convert between ROS Bag and visual dataset directory formats (containing images folder, IMU CSV, and LiDAR point clouds).",
     bagToFolder: "ROS Bag → Folder",
@@ -299,6 +329,258 @@ function boolText(value: boolean | null, t: (typeof copy)[Language]) {
   return value ? t.yes : t.no;
 }
 
+interface LidarVisualizerProps {
+  folderPath: string;
+  filename: string;
+}
+
+const LidarVisualizer = ({ folderPath, filename }: LidarVisualizerProps) => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<OrbitControls | null>(null);
+  const pointsRef = useRef<THREE.Points | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  // Initialize ThreeJS Scene
+  useEffect(() => {
+    if (!mountRef.current) return;
+
+    // Create scene
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x0b0f19); // sleek dark-mode background
+    sceneRef.current = scene;
+
+    // Create camera
+    const camera = new THREE.PerspectiveCamera(
+      60,
+      mountRef.current.clientWidth / mountRef.current.clientHeight,
+      0.1,
+      1000
+    );
+    camera.position.set(10, 10, 10);
+    cameraRef.current = camera;
+
+    // Create renderer
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    mountRef.current.appendChild(renderer.domElement);
+    rendererRef.current = renderer;
+
+    // Add OrbitControls
+    const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.maxPolarAngle = Math.PI / 2 + 0.1; // allow slightly looking from below
+    controlsRef.current = controls;
+
+    // Add Grid Helper
+    const gridHelper = new THREE.GridHelper(40, 40, 0x334155, 0x1e293b);
+    scene.add(gridHelper);
+
+    // Add Axes Helper
+    const axesHelper = new THREE.AxesHelper(5);
+    scene.add(axesHelper);
+
+    // Radar body: small cylinder at center (0,0,0)
+    const bodyGeometry = new THREE.CylinderGeometry(0.3, 0.3, 0.4, 16);
+    const bodyMaterial = new THREE.MeshBasicMaterial({
+      color: 0x06b6d4, // Cyan
+    });
+    const bodyMesh = new THREE.Mesh(bodyGeometry, bodyMaterial);
+    bodyMesh.position.y = 0.2; // place it resting on the grid
+    scene.add(bodyMesh);
+
+    // Radar body top cap: black thin cylinder
+    const capGeometry = new THREE.CylinderGeometry(0.31, 0.31, 0.05, 16);
+    const capMaterial = new THREE.MeshBasicMaterial({ color: 0x020617 });
+    const capMesh = new THREE.Mesh(capGeometry, capMaterial);
+    capMesh.position.y = 0.4;
+    scene.add(capMesh);
+
+    // Animation loop
+    let animationFrameId: number;
+    const animate = () => {
+      animationFrameId = requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    // Handle resizing
+    const resizeObserver = new ResizeObserver(() => {
+      if (!mountRef.current || !rendererRef.current || !cameraRef.current) return;
+      const { width, height } = mountRef.current.getBoundingClientRect();
+      cameraRef.current.aspect = width / height;
+      cameraRef.current.updateProjectionMatrix();
+      rendererRef.current.setSize(width, height);
+    });
+    resizeObserver.observe(mountRef.current);
+
+    return () => {
+      cancelAnimationFrame(animationFrameId);
+      resizeObserver.disconnect();
+      if (rendererRef.current && mountRef.current) {
+        mountRef.current.removeChild(rendererRef.current.domElement);
+      }
+    };
+  }, []);
+
+  // Fetch and parse LiDAR file whenever filename changes
+  useEffect(() => {
+    if (!filename || !folderPath || !sceneRef.current) return;
+
+    let active = true;
+    setLoading(true);
+
+    async function fetchLidar() {
+      try {
+        const fileUrl = await getLocalFileUrl(`${folderPath}/lidar/${filename}`);
+        const response = await fetch(fileUrl);
+        if (!response.ok) throw new Error("Fetch failed");
+        
+        const ext = filename.split(".").pop()?.toLowerCase() || "";
+        
+        let positions: Float32Array;
+        if (ext === "bin" || ext === "pcd") {
+          const buffer = await response.arrayBuffer();
+          if (ext === "bin") {
+            positions = new Float32Array(buffer);
+          } else {
+            const textDecoder = new TextDecoder("ascii");
+            const headerChunk = textDecoder.decode(new Uint8Array(buffer, 0, Math.min(buffer.byteLength, 1500)));
+            const dataIndex = headerChunk.indexOf("DATA binary");
+            if (dataIndex !== -1) {
+              const newlineIndex = headerChunk.indexOf("\n", dataIndex);
+              const dataStart = newlineIndex + 1;
+              const pointsBuffer = buffer.slice(dataStart);
+              positions = new Float32Array(pointsBuffer);
+            } else {
+              const fullText = textDecoder.decode(new Uint8Array(buffer));
+              positions = parseAsciiLidar(fullText);
+            }
+          }
+        } else {
+          const text = await response.text();
+          positions = parseAsciiLidar(text);
+        }
+
+        if (!active) return;
+
+        if (positions && positions.length > 0) {
+          if (pointsRef.current && sceneRef.current) {
+            sceneRef.current.remove(pointsRef.current);
+            pointsRef.current.geometry.dispose();
+            pointsRef.current = null;
+          }
+
+          const geometry = new THREE.BufferGeometry();
+          const validLength = Math.floor(positions.length / 3) * 3;
+          const posAttribute = new THREE.BufferAttribute(positions.subarray(0, validLength), 3);
+          geometry.setAttribute("position", posAttribute);
+
+          // Color by Height (Z-axis)
+          let minZ = Infinity;
+          let maxZ = -Infinity;
+          for (let i = 2; i < validLength; i += 3) {
+            const z = positions[i];
+            if (z < minZ) minZ = z;
+            if (z > maxZ) maxZ = z;
+          }
+          if (minZ === maxZ) { minZ = -1; maxZ = 1; }
+
+          const colors = new Float32Array(validLength);
+          for (let i = 0; i < validLength; i += 3) {
+            const z = positions[i + 2];
+            const norm = (z - minZ) / (maxZ - minZ);
+            const r = Math.max(0, Math.min(1, 4 * norm - 1.5));
+            const g = Math.max(0, Math.min(1, 4.5 * (0.5 - Math.abs(norm - 0.5))));
+            const b = Math.max(0, Math.min(1, 1.5 - 4 * norm));
+            colors[i] = r;
+            colors[i + 1] = g;
+            colors[i + 2] = b;
+          }
+          geometry.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+
+          const material = new THREE.PointsMaterial({
+            size: 0.06,
+            vertexColors: true,
+            sizeAttenuation: true,
+          });
+
+          const pointsMesh = new THREE.Points(geometry, material);
+          if (sceneRef.current) {
+            sceneRef.current.add(pointsMesh);
+            pointsRef.current = pointsMesh;
+          }
+        }
+
+      } catch (err) {
+        console.error("Error loading LiDAR pointcloud:", err);
+      } finally {
+        if (active) setLoading(false);
+      }
+    }
+
+    fetchLidar();
+
+    return () => {
+      active = false;
+    };
+  }, [filename, folderPath]);
+
+  return (
+    <div style={{ width: "100%", height: "100%", position: "relative" }}>
+      <div ref={mountRef} style={{ width: "100%", height: "100%" }} />
+      {loading && (
+        <div style={{ position: "absolute", top: 10, right: 10, background: "rgba(15, 23, 42, 0.8)", padding: "4px 8px", borderRadius: "4px", fontSize: "12px", color: "#38bdf8" }}>
+          Loading pointcloud...
+        </div>
+      )}
+    </div>
+  );
+};
+
+function parseAsciiLidar(text: string): Float32Array {
+  const lines = text.split("\n");
+  const points: number[] = [];
+  let dataReached = false;
+  
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line) continue;
+    
+    if (!dataReached) {
+      if (line.startsWith("DATA")) {
+        dataReached = true;
+        continue;
+      }
+      if (line.startsWith("VERSION") || line.startsWith("FIELDS") || line.startsWith("SIZE") || 
+          line.startsWith("TYPE") || line.startsWith("COUNT") || line.startsWith("WIDTH") || 
+          line.startsWith("HEIGHT") || line.startsWith("VIEWPOINT") || line.startsWith("POINTS")) {
+        continue;
+      }
+      if (line.startsWith("#")) {
+        continue;
+      }
+      dataReached = true;
+    }
+    
+    const parts = line.split(/[\s,]+/);
+    if (parts.length >= 3) {
+      const x = parseFloat(parts[0]);
+      const y = parseFloat(parts[1]);
+      const z = parseFloat(parts[2]);
+      if (!isNaN(x) && !isNaN(y) && !isNaN(z)) {
+        points.push(x, y, z);
+      }
+    }
+  }
+  return new Float32Array(points);
+}
+
 export function App() {
   const [language, setLanguage] = useState<Language>("zh");
   const t = copy[language];
@@ -339,8 +621,31 @@ export function App() {
 
   const isConvertWindow = new URLSearchParams(window.location.search).get("window") === "convert";
 
-  // Page switcher tab state: "prepare" | "inspect" | "run" | "convert"
-  const [activeTab, setActiveTab] = useState<"prepare" | "inspect" | "run" | "convert">("prepare");
+  // Page switcher tab state: "prepare" | "inspect" | "run" | "convert" | "playback"
+  const [activeTab, setActiveTab] = useState<"prepare" | "inspect" | "run" | "convert" | "playback">("prepare");
+
+  // Playback States
+  const [playbackPath, setPlaybackPath] = useState("");
+  const [playbackMode, setPlaybackMode] = useState<"folder" | "rosbag">("folder");
+  const [playbackImages, setPlaybackImages] = useState<string[]>([]);
+  const [playbackLidars, setPlaybackLidars] = useState<string[]>([]);
+  const [playbackImu, setPlaybackImu] = useState<string[][]>([]);
+  const [playbackIndex, setPlaybackIndex] = useState(0);
+  const [isPlayMode, setIsPlayMode] = useState(false);
+  const [playbackSpeed, setPlaybackSpeed] = useState(1);
+  const [isLoop, setIsLoop] = useState(true);
+  const [playbackError, setPlaybackError] = useState("");
+  const [isUnpacking, setIsUnpacking] = useState(false);
+  const [unpackProgress, setUnpackProgress] = useState("");
+  const [apiBase, setApiBase] = useState("http://127.0.0.1:8000");
+
+  useEffect(() => {
+    if (window.desktop?.getApiBase) {
+      window.desktop.getApiBase().then((base) => {
+        if (base) setApiBase(base);
+      });
+    }
+  }, []);
 
   // Conversion States
   const [bagSourcePath, setBagSourcePath] = useState("");
@@ -939,6 +1244,112 @@ export function App() {
       setConvertError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  async function loadPlaybackData(folderPath: string) {
+    setPlaybackError("");
+    try {
+      const res = await getDatasetFiles(folderPath);
+      if (res.success) {
+        setPlaybackImages(res.images || []);
+        setPlaybackLidars(res.lidars || []);
+        setPlaybackImu(res.imu || []);
+        setPlaybackIndex(0);
+      } else {
+        setPlaybackError(language === "zh" ? "未能读取数据集目录文件" : "Failed to load files from directory.");
+      }
+    } catch (err) {
+      setPlaybackError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function handlePlaybackBagToFolderUnpack() {
+    if (!playbackPath) return;
+    setIsUnpacking(true);
+    setPlaybackError("");
+    setUnpackProgress("Initializing unpack task...");
+    try {
+      const rosbagName = playbackPath.split(/[/\\]/).pop()?.split(".")[0] || "playback_bag";
+      const lastSlashIndex = Math.max(playbackPath.lastIndexOf("/"), playbackPath.lastIndexOf("\\"));
+      const parentDir = lastSlashIndex !== -1 ? playbackPath.substring(0, lastSlashIndex) : ".";
+      const defaultOutputPath = `${parentDir}/${rosbagName}_playback_unpacked`;
+
+      const res = await convertBagToFolder({
+        sourcePath: playbackPath,
+        outputPath: defaultOutputPath,
+        imageFormat: ".jpg",
+        lidarFormat: ".pcd"
+      });
+
+      if (res.status === "processing" && res.taskId) {
+        const taskId = res.taskId;
+        const pollInterval = setInterval(async () => {
+          try {
+            const statusRes = await getConvertStatus(taskId);
+            setUnpackProgress(statusRes.message || "Extracting...");
+            if (statusRes.status === "success") {
+              clearInterval(pollInterval);
+              setIsUnpacking(false);
+              setPlaybackPath(defaultOutputPath);
+              setPlaybackMode("folder");
+              await loadPlaybackData(defaultOutputPath);
+            } else if (statusRes.status === "failed") {
+              clearInterval(pollInterval);
+              setPlaybackError(statusRes.message || "Failed to extract");
+              setIsUnpacking(false);
+            }
+          } catch (err) {
+            clearInterval(pollInterval);
+            setPlaybackError(err instanceof Error ? err.message : String(err));
+            setIsUnpacking(false);
+          }
+        }, 2000);
+      } else if (res.status === "success") {
+        setIsUnpacking(false);
+        setPlaybackPath(defaultOutputPath);
+        setPlaybackMode("folder");
+        await loadPlaybackData(defaultOutputPath);
+      } else {
+        setPlaybackError("Failed to start unpack task");
+        setIsUnpacking(false);
+      }
+    } catch (err) {
+      setPlaybackError(err instanceof Error ? err.message : String(err));
+      setIsUnpacking(false);
+    }
+  }
+
+  // Effect to drive playback index over time
+  useEffect(() => {
+    if (!isPlayMode) return;
+    const intervalMs = Math.max(10, Math.round(100 / playbackSpeed));
+    const maxFrames = Math.max(playbackImages.length, playbackLidars.length);
+    if (maxFrames === 0) return;
+
+    const intervalId = setInterval(() => {
+      setPlaybackIndex((prev) => {
+        if (prev >= maxFrames - 1) {
+          if (isLoop) {
+            return 0;
+          } else {
+            setIsPlayMode(false);
+            return prev;
+          }
+        }
+        return prev + 1;
+      });
+    }, intervalMs);
+
+    return () => clearInterval(intervalId);
+  }, [isPlayMode, playbackSpeed, playbackImages.length, playbackLidars.length, isLoop]);
+
+  // Derived IMU Row
+  const currentImuRow = useMemo(() => {
+    if (playbackImu.length === 0) return null;
+    const maxFrames = Math.max(playbackImages.length, playbackLidars.length);
+    if (maxFrames === 0) return null;
+    const idx = Math.floor((playbackIndex / maxFrames) * playbackImu.length);
+    return playbackImu[idx];
+  }, [playbackImu, playbackIndex, playbackImages.length, playbackLidars.length]);
 
   async function handleBagToFolder() {
     if (!bagSourcePath || !bagOutputPath) return;
@@ -1573,6 +1984,16 @@ export function App() {
           >
             <Settings2 size={18} />
             {t.navRun}
+          </button>
+          <button
+            className={activeTab === "playback" ? "active" : ""}
+            onClick={() => {
+              setIsRunning(false);
+              setActiveTab("playback");
+            }}
+          >
+            <Play size={18} />
+            {t.navPlayback}
           </button>
         </nav>
 
@@ -2783,6 +3204,243 @@ export function App() {
                         </div>
                       </div>
                     </div>
+                  </section>
+                </div>
+              )}
+
+              {/* Tab: 数据播放 */}
+              {activeTab === "playback" && (
+                <div style={{ maxWidth: "1200px", margin: "0 auto", width: "100%", display: "flex", flexDirection: "column", gap: "20px" }}>
+                  <section className="panel" style={{ padding: "20px" }}>
+                    <div className="panel-heading" style={{ marginBottom: "16px" }}>
+                      <div>
+                        <span className="eyebrow">{t.navPlayback}</span>
+                        <h2>{t.playbackTitle}</h2>
+                      </div>
+                      <Play size={22} style={{ color: "#0d9488" }} />
+                    </div>
+
+                    {/* Loader */}
+                    <div style={{ display: "flex", gap: "10px", alignItems: "center", marginBottom: "16px", background: "rgba(255,255,255,0.45)", padding: "12px", borderRadius: "8px", border: "1px solid rgba(38,35,30,0.08)" }}>
+                      <button 
+                        onClick={async () => {
+                          if (!window.desktop?.selectPath) return;
+                          const path = await window.desktop.selectPath({ title: "选择包含 images, lidar 文件夹和 imu.csv 的数据集目录", mode: "folder" });
+                          if (path) {
+                            setPlaybackPath(path);
+                            setPlaybackMode("folder");
+                            loadPlaybackData(path);
+                          }
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: "6px", height: "38px" }}
+                      >
+                        <FolderOpen size={16} />
+                        <span>{t.chooseFolder}</span>
+                      </button>
+
+                      <button 
+                        onClick={async () => {
+                          if (!window.desktop?.selectPath) return;
+                          const path = await window.desktop.selectPath({ 
+                            title: "选择 ROS Bag 文件", 
+                            mode: "file",
+                            filters: [{ name: "ROS Bag", extensions: ["bag", "db3", "mcap"] }]
+                          });
+                          if (path) {
+                            setPlaybackPath(path);
+                            setPlaybackMode("rosbag");
+                            setPlaybackImages([]);
+                            setPlaybackLidars([]);
+                            setPlaybackImu([]);
+                          }
+                        }}
+                        style={{ display: "flex", alignItems: "center", gap: "6px", height: "38px" }}
+                      >
+                        <FileArchive size={16} />
+                        <span>{t.chooseBag}</span>
+                      </button>
+
+                      <div style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: "13px", color: "#475569" }}>
+                        <strong>{t.selected}:</strong> <span style={{ fontFamily: "monospace" }}>{playbackPath || t.notSelected}</span>
+                      </div>
+
+                      {playbackMode === "rosbag" && playbackPath && (
+                        <button 
+                          className="primary" 
+                          disabled={isUnpacking} 
+                          onClick={handlePlaybackBagToFolderUnpack}
+                          style={{ height: "38px" }}
+                        >
+                          {isUnpacking ? "正在解包..." : "解包并载入播放"}
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Show errors or unpacking statuses */}
+                    {playbackError && (
+                      <div className="alert danger" style={{ marginBottom: "16px" }}>
+                        <AlertTriangle size={18} />
+                        <span>{playbackError}</span>
+                      </div>
+                    )}
+                    {isUnpacking && (
+                      <div className="alert info" style={{ marginBottom: "16px", background: "rgba(14, 165, 233, 0.05)", border: "1px solid rgba(14, 165, 233, 0.3)", color: "#0369a1" }}>
+                        <RefreshCw size={18} className="spin" style={{ animation: "spin 2s linear infinite" }} />
+                        <span>{unpackProgress}</span>
+                      </div>
+                    )}
+
+                    {/* Only show player if data is loaded */}
+                    {(playbackImages.length > 0 || playbackLidars.length > 0) ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: "16px" }}>
+                        {/* Playback Control panel */}
+                        <div style={{ display: "flex", flexWrap: "wrap", gap: "16px", alignItems: "center", background: "#f8fafc", padding: "16px", borderRadius: "8px", border: "1px solid #e2e8f0" }}>
+                          <button 
+                            className={isPlayMode ? "warning" : "primary"}
+                            onClick={() => setIsPlayMode(!isPlayMode)}
+                            style={{ width: "90px", height: "36px" }}
+                          >
+                            {isPlayMode ? t.pause : t.play}
+                          </button>
+                          
+                          <button 
+                            onClick={() => setPlaybackIndex((prev) => Math.max(0, prev - 1))}
+                            disabled={isPlayMode}
+                            style={{ height: "36px", padding: "0 10px" }}
+                          >
+                            {t.stepBackward}
+                          </button>
+
+                          <button 
+                            onClick={() => {
+                              const maxFrames = Math.max(playbackImages.length, playbackLidars.length);
+                              setPlaybackIndex((prev) => Math.min(maxFrames - 1, prev + 1));
+                            }}
+                            disabled={isPlayMode}
+                            style={{ height: "36px", padding: "0 10px" }}
+                          >
+                            {t.stepForward}
+                          </button>
+
+                          <div style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "13px", color: "#475569" }}>
+                            <span>{t.playbackSpeed}:</span>
+                            <select 
+                              value={playbackSpeed} 
+                              onChange={(e) => setPlaybackSpeed(parseFloat(e.target.value))}
+                              style={{ padding: "4px 8px", borderRadius: "4px", border: "1px solid #cbd5e1", background: "#fff", color: "#1e293b" }}
+                            >
+                              <option value="0.5">0.5x</option>
+                              <option value="1">1.0x</option>
+                              <option value="2">2.0x</option>
+                              <option value="5">5.0x</option>
+                            </select>
+                          </div>
+
+                          <label style={{ display: "flex", alignItems: "center", gap: "6px", fontSize: "13px", color: "#475569", cursor: "pointer" }}>
+                            <input 
+                              type="checkbox" 
+                              checked={isLoop} 
+                              onChange={(e) => setIsLoop(e.target.checked)} 
+                            />
+                            <span>{t.loop}</span>
+                          </label>
+
+                          <div style={{ flex: 1, display: "flex", alignItems: "center", gap: "10px" }}>
+                            <input 
+                              type="range"
+                              min={0}
+                              max={Math.max(playbackImages.length, playbackLidars.length) - 1}
+                              value={playbackIndex}
+                              onChange={(e) => setPlaybackIndex(parseInt(e.target.value))}
+                              style={{ flex: 1, accentColor: "#0d9488", cursor: "pointer" }}
+                            />
+                            <span style={{ fontSize: "13px", fontFamily: "monospace", color: "#475569", minWidth: "90px", textAlign: "right" }}>
+                              {playbackIndex + 1} / {Math.max(playbackImages.length, playbackLidars.length)}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Split Display Grid */}
+                        <div style={{ display: "grid", gridTemplateColumns: "1fr 1.2fr", gap: "16px", minHeight: "450px" }}>
+                          
+                          {/* Image player (Left) */}
+                          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                            <h3 style={{ fontSize: "14px", fontWeight: "bold", margin: 0, color: "#1e293b", display: "flex", alignItems: "center", gap: "6px" }}>
+                              <FileImage size={16} style={{ color: "#0d9488" }} />
+                              <span>{t.viewCamera}</span>
+                            </h3>
+                            <div style={{ flex: 1, background: "#0f172a", borderRadius: "8px", border: "1px solid #1e293b", display: "flex", justifyContent: "center", alignItems: "center", overflow: "hidden", minHeight: "400px", position: "relative" }}>
+                              {playbackImages[playbackIndex] ? (
+                                <img 
+                                  src={`${apiBase}/api/dataset/file?path=${encodeURIComponent(playbackPath + "/images/" + playbackImages[playbackIndex])}`}
+                                  alt={`Frame ${playbackIndex}`}
+                                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain" }}
+                                />
+                              ) : (
+                                <span style={{ color: "#64748b", fontSize: "13px" }}>无相机图像 (No Camera Frame)</span>
+                              )}
+                              {playbackImages[playbackIndex] && (
+                                <div style={{ position: "absolute", bottom: 10, left: 10, background: "rgba(15,23,42,0.85)", color: "#94a3b8", padding: "4px 8px", borderRadius: "4px", fontSize: "11px", fontFamily: "monospace" }}>
+                                  {playbackImages[playbackIndex]}
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* 3D LiDAR Visualizer (Right) */}
+                          <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
+                            <h3 style={{ fontSize: "14px", fontWeight: "bold", margin: 0, color: "#1e293b", display: "flex", alignItems: "center", gap: "6px" }}>
+                              <Radar size={16} style={{ color: "#0d9488" }} />
+                              <span>{t.lidar3dTitle}</span>
+                            </h3>
+                            <div style={{ flex: 1, background: "#0b0f19", borderRadius: "8px", border: "1px solid #1e293b", minHeight: "400px", overflow: "hidden" }}>
+                              {playbackLidars[playbackIndex] ? (
+                                <LidarVisualizer 
+                                  folderPath={playbackPath}
+                                  filename={playbackLidars[playbackIndex]}
+                                />
+                              ) : (
+                                <div style={{ width: "100%", height: "100%", display: "flex", justifyContent: "center", alignItems: "center", color: "#64748b", fontSize: "13px" }}>
+                                  无激光雷达数据 (No LiDAR Frame)
+                                </div>
+                              )}
+                            </div>
+                          </div>
+
+                        </div>
+
+                        {/* Monospace IMU Telemetry scrolling/rolling box (Bottom) */}
+                        <div style={{ display: "flex", flexDirection: "column", gap: "6px", marginTop: "4px" }}>
+                          <h3 style={{ fontSize: "14px", fontWeight: "bold", margin: 0, color: "#1e293b", display: "flex", alignItems: "center", gap: "6px" }}>
+                            <Activity size={16} style={{ color: "#0d9488" }} />
+                            <span>{t.imuTitle}</span>
+                          </h3>
+                          <div style={{ display: "flex", alignItems: "center", background: "#0f172a", border: "1px solid #1e293b", borderRadius: "8px", padding: "8px 12px", width: "100%" }}>
+                            <input 
+                              type="text" 
+                              readOnly 
+                              value={currentImuRow ? currentImuRow.join(" | ") : "暂无 IMU 数据 (No IMU data)"}
+                              style={{
+                                width: "100%",
+                                background: "transparent",
+                                border: 0,
+                                outline: "none",
+                                color: "#38bdf8",
+                                fontFamily: "monospace",
+                                fontSize: "13px",
+                                textOverflow: "ellipsis"
+                              }}
+                            />
+                          </div>
+                        </div>
+
+                      </div>
+                    ) : (
+                      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: "250px", border: "2px dashed #cbd5e1", borderRadius: "8px", background: "rgba(255,255,255,0.3)", color: "#64748b" }}>
+                        <Play size={32} style={{ color: "#94a3b8", marginBottom: "8px" }} />
+                        <span style={{ fontSize: "14px" }}>{t.noData}</span>
+                      </div>
+                    )}
                   </section>
                 </div>
               )}

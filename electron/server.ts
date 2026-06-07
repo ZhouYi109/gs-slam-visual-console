@@ -593,6 +593,29 @@ export async function createApiServer() {
     }
   });
 
+  api.get("/api/dataset/file", async (request, response, next) => {
+    try {
+      const filePath = String(request.query.path ?? "");
+      response.sendFile(filePath);
+    } catch (e) {
+      next(e);
+    }
+  });
+
+  api.get("/api/dataset/get_files", async (request, response, next) => {
+    try {
+      const folderPath = String(request.query.path ?? "");
+      const fetchResponse = await fetch(`http://127.0.0.1:8000/api/dataset/get_files?path=${encodeURIComponent(folderPath)}`);
+      if (fetchResponse.ok) {
+        response.json(await fetchResponse.json());
+      } else {
+        response.status(fetchResponse.status).send(await fetchResponse.text());
+      }
+    } catch (e) {
+      next(e);
+    }
+  });
+
   api.post("/api/server/find_launches", async (request, response, next) => {
     let conn: Client | undefined;
     try {

@@ -166,7 +166,48 @@ def api_convert_folder_to_bag(req: ConvertFolderToBagRequest, background_tasks: 
     tasks[task_id] = {"status": "processing", "message": "Starting conversion..."}
     background_tasks.add_task(run_folder_to_bag_task, task_id, req)
     return {"status": "processing", "taskId": task_id}
-
+@app.get("/api/dataset/get_files")
+def api_get_files(path: str):
+    import csv
+    folder_path = Path(path)
+    if not folder_path.exists():
+        raise HTTPException(status_code=404, detail="Directory does not exist")
+        
+    img_dir = folder_path / "images"
+    lidar_dir = folder_path / "lidar"
+    imu_csv = folder_path / "imu.csv"
+    
+    images = []
+    if img_dir.exists():
+        images = [f.name for f in img_dir.iterdir() if f.suffix.lower() in ['.jpg', '.jpeg', '.png', '.bmp']]
+        images.sort()
+        
+    lidars = []
+    if lidar_dir.exists():
+        lidars = [f.name for f in lidar_dir.iterdir() if f.suffix.lower() in ['.pcd', '.bin', '.txt']]
+        lidars.sort()
+        
+    imu_data = []
+    if imu_csv.exists():
+        try:
+            with open(imu_csv, 'r') as f:
+                reader_csv = csv.reader(f)
+                hdr = next(reader_csv, None)
+                has_hdr = hdr and hdr[0].strip().lower() == 'timestamp'
+                if not has_hdr and hdr:
+                    imu_data.append(hdr)
+                for row in reader_csv:
+                    if row:
+                        imu_data.append(row)
+        except Exception as e:
+            pass
+            
+    return {
+        "success": True,
+        "images": images,
+        "lidars": lidars,
+        "imu": imu_data
+    }
 if __name__ == "__main__":
     import uvicorn
     # Allow running directly via python main.py

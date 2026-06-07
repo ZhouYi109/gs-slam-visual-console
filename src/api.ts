@@ -133,4 +133,18 @@ export async function getRemoteFileUrl(req: { host?: string; port?: number; user
   return `${base}/api/server/get_remote_file?${params.toString()}`;
 }
 
+export async function getDatasetFiles(path: string) {
+  const base = await getBaseUrl();
+  const res = await fetch(`${base}/api/dataset/get_files?path=${encodeURIComponent(path)}`);
+  if (!res.ok) {
+    throw new Error(`Failed to read dataset directory: ${res.statusText}`);
+  }
+  return (await res.json()) as { success: boolean; images: string[]; lidars: string[]; imu: string[][] };
+}
+
+export async function getLocalFileUrl(path: string) {
+  const base = await getBaseUrl();
+  return `${base}/api/dataset/file?path=${encodeURIComponent(path)}`;
+}
+
 
